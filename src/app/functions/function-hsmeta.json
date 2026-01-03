@@ -1,0 +1,15 @@
+{
+  "uid": "FeeSheetGenerator_app_function",
+  "type": "app-function",
+  "config": {
+    "entrypoint": "/app/functions/NewFunction.js",
+    "endpoint": {
+      "path": "/api/function-one",
+      "methods": [
+        "POST"
+      ]
+    },
+"secretKeys": ["HUBSPOT_TOKEN", "MS_TENANT_ID", "MS_CLIENT_ID", "MS_CLIENT_SECRET"]
+
+  }
+}
