@@ -3,13 +3,13 @@ const cors = require("cors");
 
 const app = express();
 
-// OK for dev/testing. Tighten later if you want.
+// Simple CORS for now (fine for dev)
 app.use(cors());
 
-// Parse JSON
+// Parse JSON bodies (for normal clients)
 app.use(express.json({ limit: "1mb" }));
 
-// Parse form-encoded bodies (some clients send this)
+// Parse form bodies (for some clients/proxies)
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/", (req, res) => res.status(200).send("OK"));
@@ -28,16 +28,15 @@ function tryParseJsonString(maybeJson) {
 function normalizeBody(req) {
   let body = req.body;
 
-  // If empty or undefined, return empty object
   if (!body) return {};
 
-  // If Express parsed it as a string, try parsing JSON
+  // If body is a string, try JSON parse
   if (typeof body === "string") {
     const parsed = tryParseJsonString(body);
     return parsed ?? { raw: body };
   }
 
-  // If it’s an object, it might still contain JSON as a single key
+  // If it’s an object, it might contain JSON as a single key/value
   if (typeof body === "object" && !Array.isArray(body)) {
     const keys = Object.keys(body);
 
@@ -47,7 +46,6 @@ function normalizeBody(req) {
       const parsedKey = tryParseJsonString(onlyKey);
       if (parsedKey) return parsedKey;
 
-      // Case: { payload: '{"action":"get","objectId":"123"}' }
       const val = body[onlyKey];
       const parsedVal = tryParseJsonString(val);
       if (parsedVal) return parsedVal;
@@ -65,30 +63,38 @@ function normalizeBody(req) {
     return body;
   }
 
-  // Arrays etc.
   return { raw: body };
 }
 
-app.post("/api/fee-sheet", async (req, res) => {
+// Support GET/POST (HubSpot fetch sometimes struggles with POST body)
+app.all("/api/fee-sheet", async (req, res) => {
   try {
     const body = normalizeBody(req);
 
-    // Helpful logs for Render
+    // Prefer query params (most reliable through HubSpot fetch)
+    const action = String(req.query.action || body.action || "");
+    const objectId = String(req.query.objectId || body.objectId || "");
+    const createdBy = String(req.query.createdBy || body.createdBy || "");
+
+    // Helpful logs for Render debugging
     console.log("---- /api/fee-sheet ----");
+    console.log("method:", req.method);
     console.log("content-type:", req.headers["content-type"]);
+    console.log("query:", req.query);
     console.log("normalized body:", body);
 
-    const { action, objectId, createdBy } = body || {};
-
     if (!action || !objectId) {
-      // DEBUG RESPONSE so you can see what HubSpot actually sent
       return res.status(400).json({
         message: "Need action + objectId",
-        received: body,
+        received: {
+          query: req.query || {},
+          body: body || {},
+        },
       });
     }
 
     if (action === "get") {
+      // Placeholder "read" response
       return res.json({
         feeSheetUrl: "",
         feeSheetCreatedBy: "",
@@ -101,6 +107,7 @@ app.post("/api/fee-sheet", async (req, res) => {
     }
 
     if (action === "create") {
+      // Placeholder "create" response
       return res.json({
         feeSheetUrl: "https://example.com/fee-sheet-placeholder",
         feeSheetCreatedBy: createdBy || "Unknown user",
@@ -114,7 +121,10 @@ app.post("/api/fee-sheet", async (req, res) => {
 
     return res.status(400).json({
       message: `Unknown action: ${action}`,
-      received: body,
+      received: {
+        query: req.query || {},
+        body: body || {},
+      },
     });
   } catch (err) {
     console.error("Server error:", err);
