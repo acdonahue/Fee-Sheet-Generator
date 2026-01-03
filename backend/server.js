@@ -14,6 +14,13 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get("/", (req, res) => res.status(200).send("OK"));
 
+app.get("/__version", (req, res) =>
+  res.json({
+    version: "REAL_BACKEND_2026-01-02",
+    now: new Date().toISOString(),
+  })
+);
+
 function tryParseJsonString(maybeJson) {
   if (typeof maybeJson !== "string") return null;
   const s = maybeJson.trim();
