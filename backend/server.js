@@ -9,10 +9,9 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get("/", (req, res) => res.status(200).send("OK"));
 
-// Fingerprint endpoint so you can confirm Render is running the right code
 app.get("/__version", (req, res) =>
   res.json({
-    version: "REAL_BACKEND_2026-01-02",
+    version: "REAL_BACKEND_2026-01-03",
     now: new Date().toISOString(),
   })
 );
@@ -59,6 +58,7 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
   const json = await resp.json();
   return {
     feeSheetUrl: json?.properties?.fee_sheet_url || "",
+    // HubSpot datetime picker returns ms (string). Keep as-is.
     feeSheetCreatedAt: json?.properties?.fee_sheet_created_at || "",
     feeSheetCreatedBy: json?.properties?.fee_sheet_created_by || "",
     feeSheetFileName: json?.properties?.fee_sheet_file_name || "",
@@ -73,6 +73,11 @@ async function getDealName(dealId, token) {
       headers: { Authorization: `Bearer ${token}` },
     }
   );
+
+  if (resp.status === 404) {
+    // Don’t hard fail: fallback name
+    return `Deal ${dealId}`;
+  }
 
   if (!resp.ok) {
     throw new Error(`Failed to fetch deal name (${resp.status})`);
@@ -117,7 +122,6 @@ async function getMsAccessToken() {
   return json.access_token;
 }
 
-// Converts a SharePoint sharing link into a Graph "shareId"
 function shareLinkToShareId(url) {
   const b64 = Buffer.from(url, "utf8").toString("base64");
   return "u!" + b64.replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -145,7 +149,6 @@ async function graphJson(accessToken, url, options = {}) {
   return { resp, json, text };
 }
 
-// Fetch file metadata from a SharePoint share link
 async function graphGetDriveItemMetaFromShareLink(accessToken, shareLink) {
   const shareId = shareLinkToShareId(shareLink);
 
@@ -162,7 +165,6 @@ async function graphGetDriveItemMetaFromShareLink(accessToken, shareLink) {
   };
 }
 
-// Create a share link for a drive item
 async function graphCreateShareLink(accessToken, driveId, itemId) {
   const scope = process.env.SHARE_LINK_SCOPE || "organization"; // or "anonymous"
   const type = "view";
@@ -179,7 +181,6 @@ async function graphCreateShareLink(accessToken, driveId, itemId) {
   return json?.link?.webUrl || "";
 }
 
-// Copy template drive item and wait until new item appears
 async function graphCopyDriveItemAndWait(accessToken, driveId, itemId, parentId, newName) {
   const { resp } = await graphJson(
     accessToken,
@@ -231,8 +232,7 @@ async function graphCopyDriveItemAndWait(accessToken, driveId, itemId, parentId,
 
 /**
  * ----------------------------
- * Main endpoint (GET/POST)
- * Matches your query-string NewCard.tsx
+ * Main endpoint
  * ----------------------------
  */
 app.all("/api/fee-sheet", async (req, res) => {
@@ -253,7 +253,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.status(500).json({ message: "Missing HUBSPOT_TOKEN secret" });
     }
 
-    // 1) GET action (card loads)
     if (action === "get") {
       const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
 
@@ -267,11 +266,12 @@ app.all("/api/fee-sheet", async (req, res) => {
             feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
             feeSheetFileName: meta.feeSheetFileName || sp.name || "",
             lastUpdatedAt: sp.lastModifiedDateTime || "",
+            // Your card uses these for the status pill
             spCreatedAt: meta.feeSheetCreatedAt || sp.createdDateTime || "",
             spLastModifiedAt: sp.lastModifiedDateTime || "",
             message: "Loaded ✅",
           });
-        } catch (e) {
+        } catch {
           return res.json({
             feeSheetUrl: meta.feeSheetUrl || "",
             feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
@@ -295,7 +295,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    // 2) CREATE action (button click)
     if (action === "create") {
       const TEMPLATE_SHARE_LINK = process.env.TEMPLATE_SHARE_LINK;
       if (!TEMPLATE_SHARE_LINK) {
@@ -322,7 +321,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       const accessToken = await getMsAccessToken();
 
-      // Resolve the template share link to a driveItem
+      // Resolve template share link to a driveItem
       const templateShareId = shareLinkToShareId(TEMPLATE_SHARE_LINK);
       const { json: templateItem } = await graphJson(
         accessToken,
@@ -336,9 +335,11 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       const dealName = await getDealName(dealId, hubspotToken);
       const safeDealName = String(dealName).replace(/[\\/:*?"<>|]/g, "-").trim();
-      const fileName = `Fee Sheet - ${safeDealName}.xlsx`;
 
-      // Copy and wait for the new item
+      // ✅ Your exact naming rule:
+      const fileName = `${safeDealName} - Fee Sheet Template-v05192025.xlsx`;
+
+      // Copy template and wait for new file
       const newItem = await graphCopyDriveItemAndWait(
         accessToken,
         parent.driveId,
@@ -347,21 +348,18 @@ app.all("/api/fee-sheet", async (req, res) => {
         fileName
       );
 
-      // Create a share link for the new file
+      // Create share link
       const shareUrl = await graphCreateShareLink(accessToken, parent.driveId, newItem.id);
       if (!shareUrl) throw new Error("Could not create SharePoint share link for new file.");
 
-      // If your HubSpot property is date-only, midnight UTC is required.
-      // If it's datetime, this still works.
-      const now = new Date();
-      const createdAtMidnightUtc = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
-      ).toISOString();
+      // ✅ HubSpot date/time picker expects milliseconds since epoch
+      const createdAtMs = Date.now();
 
+      // Save metadata to the Deal
       await hubspotPatchDeal(dealId, hubspotToken, {
         fee_sheet_url: shareUrl,
         fee_sheet_created_by: createdBySafe,
-        fee_sheet_created_at: createdAtMidnightUtc,
+        fee_sheet_created_at: String(createdAtMs),
         fee_sheet_file_name: fileName,
       });
 
@@ -371,7 +369,7 @@ app.all("/api/fee-sheet", async (req, res) => {
         feeSheetCreatedBy: createdBySafe,
         feeSheetFileName: fileName,
         lastUpdatedAt: "",
-        spCreatedAt: createdAtMidnightUtc,
+        spCreatedAt: String(createdAtMs),
         spLastModifiedAt: "",
       });
     }
