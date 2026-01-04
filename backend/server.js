@@ -11,7 +11,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "REAL_BACKEND_2026-01-03",
+    version: "REAL_BACKEND_2026-01-04_REUSE_EXISTING",
     now: new Date().toISOString(),
   })
 );
@@ -181,6 +181,21 @@ async function graphCreateShareLink(accessToken, driveId, itemId) {
   return json?.link?.webUrl || "";
 }
 
+/**
+ * ✅ NEW: Find a file by name in a folder (prevents 409 nameAlreadyExists)
+ */
+async function graphFindChildByName(accessToken, driveId, parentId, fileName) {
+  const { json } = await graphJson(
+    accessToken,
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parentId}/children?$select=id,name,webUrl`
+  );
+
+  const items = Array.isArray(json?.value) ? json.value : [];
+  return (
+    items.find((it) => (it?.name || "").toLowerCase() === fileName.toLowerCase()) || null
+  );
+}
+
 async function graphCopyDriveItemAndWait(accessToken, driveId, itemId, parentId, newName) {
   const { resp } = await graphJson(
     accessToken,
@@ -305,7 +320,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       const createdBySafe = createdBy || "Unknown user";
 
-      // One fee sheet per deal: if it already exists, return it
+      // One fee sheet per deal: if it already exists in HubSpot, return it
       const existing = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
       if (existing?.feeSheetUrl) {
         return res.json({
@@ -338,6 +353,47 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       // ✅ Your exact naming rule:
       const fileName = `${safeDealName} - Fee Sheet Template-v05192025.xlsx`;
+
+      /**
+       * ✅ NEW: If file already exists in SharePoint folder, reuse it
+       * This prevents Graph 409 and fixes “file created but URL not saved”
+       */
+      const existingItem = await graphFindChildByName(
+        accessToken,
+        parent.driveId,
+        parent.id,
+        fileName
+      );
+
+      if (existingItem?.id) {
+        const existingShareUrl = await graphCreateShareLink(
+          accessToken,
+          parent.driveId,
+          existingItem.id
+        );
+        if (!existingShareUrl) {
+          throw new Error("Found existing file but could not create share link.");
+        }
+
+        const createdAtMs = Date.now();
+
+        await hubspotPatchDeal(dealId, hubspotToken, {
+          fee_sheet_url: existingShareUrl,
+          fee_sheet_created_by: createdBySafe,
+          fee_sheet_created_at: String(createdAtMs),
+          fee_sheet_file_name: fileName,
+        });
+
+        return res.json({
+          message: "Fee sheet already existed — linked it ✅",
+          feeSheetUrl: existingShareUrl,
+          feeSheetCreatedBy: createdBySafe,
+          feeSheetFileName: fileName,
+          lastUpdatedAt: "",
+          spCreatedAt: String(createdAtMs),
+          spLastModifiedAt: "",
+        });
+      }
 
       // Copy template and wait for new file
       const newItem = await graphCopyDriveItemAndWait(
