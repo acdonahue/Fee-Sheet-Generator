@@ -11,10 +11,30 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "REAL_BACKEND_2026-01-04_REUSE_EXISTING",
+    version: "REAL_BACKEND_2026-01-05_FAST_GET_TIMEOUTS",
     now: new Date().toISOString(),
   })
 );
+
+/**
+ * ----------------------------
+ * Small helpers
+ * ----------------------------
+ */
+function withTimeout(promise, ms, label = "timeout") {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
+  ]);
+}
+
+function safeJsonParse(text) {
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return { raw: text };
+  }
+}
 
 /**
  * ----------------------------
@@ -58,7 +78,6 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
   const json = await resp.json();
   return {
     feeSheetUrl: json?.properties?.fee_sheet_url || "",
-    // HubSpot datetime picker returns ms (string). Keep as-is.
     feeSheetCreatedAt: json?.properties?.fee_sheet_created_at || "",
     feeSheetCreatedBy: json?.properties?.fee_sheet_created_by || "",
     feeSheetFileName: json?.properties?.fee_sheet_file_name || "",
@@ -74,10 +93,7 @@ async function getDealName(dealId, token) {
     }
   );
 
-  if (resp.status === 404) {
-    // Don’t hard fail: fallback name
-    return `Deal ${dealId}`;
-  }
+  if (resp.status === 404) return `Deal ${dealId}`;
 
   if (!resp.ok) {
     throw new Error(`Failed to fetch deal name (${resp.status})`);
@@ -92,7 +108,21 @@ async function getDealName(dealId, token) {
  * Microsoft Graph helpers
  * ----------------------------
  */
+
+// ✅ Token cache to avoid slow token call on every refresh
+let msTokenCache = {
+  token: "",
+  expiresAtMs: 0,
+};
+
 async function getMsAccessToken() {
+  const now = Date.now();
+
+  // Use cached token if it's still valid (with 60s buffer)
+  if (msTokenCache.token && msTokenCache.expiresAtMs - 60_000 > now) {
+    return msTokenCache.token;
+  }
+
   const tenantId = process.env.MS_TENANT_ID;
   const clientId = process.env.MS_CLIENT_ID;
   const clientSecret = process.env.MS_CLIENT_SECRET;
@@ -118,8 +148,19 @@ async function getMsAccessToken() {
   });
 
   const json = await resp.json();
-  if (!resp.ok) throw new Error(`Microsoft token error: ${resp.status} ${JSON.stringify(json)}`);
-  return json.access_token;
+  if (!resp.ok) {
+    throw new Error(`Microsoft token error: ${resp.status} ${JSON.stringify(json)}`);
+  }
+
+  const accessToken = json.access_token || "";
+  const expiresInSec = Number(json.expires_in || 0);
+
+  msTokenCache = {
+    token: accessToken,
+    expiresAtMs: Date.now() + Math.max(0, expiresInSec) * 1000,
+  };
+
+  return accessToken;
 }
 
 function shareLinkToShareId(url) {
@@ -138,12 +179,7 @@ async function graphJson(accessToken, url, options = {}) {
   });
 
   const text = await resp.text();
-  let json;
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { raw: text };
-  }
+  const json = safeJsonParse(text);
 
   if (!resp.ok) throw new Error(`Graph error ${resp.status}: ${text}`);
   return { resp, json, text };
@@ -166,7 +202,7 @@ async function graphGetDriveItemMetaFromShareLink(accessToken, shareLink) {
 }
 
 async function graphCreateShareLink(accessToken, driveId, itemId) {
-  const scope = process.env.SHARE_LINK_SCOPE || "organization"; // or "anonymous"
+  const scope = process.env.SHARE_LINK_SCOPE || "organization";
   const type = "view";
 
   const { json } = await graphJson(
@@ -181,9 +217,6 @@ async function graphCreateShareLink(accessToken, driveId, itemId) {
   return json?.link?.webUrl || "";
 }
 
-/**
- * ✅ NEW: Find a file by name in a folder (prevents 409 nameAlreadyExists)
- */
 async function graphFindChildByName(accessToken, driveId, parentId, fileName) {
   const { json } = await graphJson(
     accessToken,
@@ -229,10 +262,7 @@ async function graphCopyDriveItemAndWait(accessToken, driveId, itemId, parentId,
     }
 
     const text = await check.text();
-    let json = {};
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {}
+    const json = safeJsonParse(text);
 
     if (check.ok) {
       if (json?.id) return json;
@@ -268,34 +298,51 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.status(500).json({ message: "Missing HUBSPOT_TOKEN secret" });
     }
 
+    /**
+     * ✅ FAST GET: never let Graph slow down the response.
+     * If Graph is slow, return HubSpot-only fields and the card still loads.
+     */
     if (action === "get") {
-      const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
+      // HubSpot should be fast, but we still keep it reasonable.
+      const meta = await withTimeout(
+        hubspotGetDealFeeSheetMeta(dealId, hubspotToken),
+        5000,
+        "HubSpot get timeout"
+      );
 
       if (meta?.feeSheetUrl) {
+        // Always have a “fast fallback” ready
+        const fastPayload = {
+          feeSheetUrl: meta.feeSheetUrl || "",
+          feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
+          feeSheetFileName: meta.feeSheetFileName || "",
+          lastUpdatedAt: "",
+          spCreatedAt: meta.feeSheetCreatedAt || "",
+          spLastModifiedAt: "",
+          message: "Loaded (fast) ✅",
+        };
+
         try {
-          const accessToken = await getMsAccessToken();
-          const sp = await graphGetDriveItemMetaFromShareLink(accessToken, meta.feeSheetUrl);
+          // Keep Graph work under a strict cap to prevent gateway timeouts.
+          const accessToken = await withTimeout(getMsAccessToken(), 2500, "MS token timeout");
+          const sp = await withTimeout(
+            graphGetDriveItemMetaFromShareLink(accessToken, meta.feeSheetUrl),
+            2500,
+            "Graph lookup timeout"
+          );
 
           return res.json({
             feeSheetUrl: meta.feeSheetUrl || "",
             feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
             feeSheetFileName: meta.feeSheetFileName || sp.name || "",
             lastUpdatedAt: sp.lastModifiedDateTime || "",
-            // Your card uses these for the status pill
             spCreatedAt: meta.feeSheetCreatedAt || sp.createdDateTime || "",
             spLastModifiedAt: sp.lastModifiedDateTime || "",
             message: "Loaded ✅",
           });
         } catch {
-          return res.json({
-            feeSheetUrl: meta.feeSheetUrl || "",
-            feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
-            feeSheetFileName: meta.feeSheetFileName || "",
-            lastUpdatedAt: "",
-            spCreatedAt: meta.feeSheetCreatedAt || "",
-            spLastModifiedAt: "",
-            message: "Loaded (HubSpot only; Graph unavailable)",
-          });
+          // Graph slow/unavailable → return quickly anyway
+          return res.json(fastPayload);
         }
       }
 
@@ -351,13 +398,10 @@ app.all("/api/fee-sheet", async (req, res) => {
       const dealName = await getDealName(dealId, hubspotToken);
       const safeDealName = String(dealName).replace(/[\\/:*?"<>|]/g, "-").trim();
 
-      // ✅ Your exact naming rule:
+      // Your exact naming rule:
       const fileName = `${safeDealName} - Fee Sheet Template-v05192025.xlsx`;
 
-      /**
-       * ✅ NEW: If file already exists in SharePoint folder, reuse it
-       * This prevents Graph 409 and fixes “file created but URL not saved”
-       */
+      // If file already exists in SharePoint folder, reuse it (prevents 409)
       const existingItem = await graphFindChildByName(
         accessToken,
         parent.driveId,
@@ -408,10 +452,8 @@ app.all("/api/fee-sheet", async (req, res) => {
       const shareUrl = await graphCreateShareLink(accessToken, parent.driveId, newItem.id);
       if (!shareUrl) throw new Error("Could not create SharePoint share link for new file.");
 
-      // ✅ HubSpot date/time picker expects milliseconds since epoch
       const createdAtMs = Date.now();
 
-      // Save metadata to the Deal
       await hubspotPatchDeal(dealId, hubspotToken, {
         fee_sheet_url: shareUrl,
         fee_sheet_created_by: createdBySafe,
