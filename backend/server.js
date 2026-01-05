@@ -11,7 +11,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "DEPLOY_TEST_ALLISON",
+    version: "REAL_BACKEND_2026-01-05_WITH_REFRESH_SYNC_AND_LAST_SYNCED_AT",
     now: new Date().toISOString(),
   })
 );
@@ -46,17 +46,14 @@ function toIsoNow() {
  * ----------------------------
  */
 async function hubspotPatchDeal(dealId, token, properties) {
-  const resp = await fetch(
-    `https://api.hubapi.com/crm/v3/objects/deals/${dealId}`,
-    {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ properties }),
-    }
-  );
+  const resp = await fetch(`https://api.hubapi.com/crm/v3/objects/deals/${dealId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ properties }),
+  });
 
   if (!resp.ok) {
     const text = await resp.text();
@@ -65,7 +62,7 @@ async function hubspotPatchDeal(dealId, token, properties) {
 }
 
 async function hubspotGetDealFeeSheetMeta(dealId, token) {
-  // ✅ Expanded properties (includes drive/item ids + ready fields)
+  // ✅ Expanded properties (includes drive/item ids + ready fields + last synced)
   const props = [
     "fee_sheet_url",
     "fee_sheet_created_by",
@@ -76,6 +73,7 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
     "fee_sheet_ready_for_proposal",
     "fee_sheet_ready_by",
     "fee_sheet_ready_at",
+    "fee_sheet_last_synced_at",
   ].join(",");
 
   const resp = await fetch(
@@ -97,6 +95,7 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
       readyForProposal: false,
       readyBy: "",
       readyAt: "",
+      feeSheetLastSyncedAt: "",
     };
   }
 
@@ -110,10 +109,10 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
     feeSheetFileName: p.fee_sheet_file_name || "",
     feeSheetDriveId: p.fee_sheet_drive_id || "",
     feeSheetItemId: p.fee_sheet_item_id || "",
-    readyForProposal:
-      String(p.fee_sheet_ready_for_proposal || "").toLowerCase() === "true",
+    readyForProposal: String(p.fee_sheet_ready_for_proposal || "").toLowerCase() === "true",
     readyBy: p.fee_sheet_ready_by || "",
     readyAt: p.fee_sheet_ready_at || "",
+    feeSheetLastSyncedAt: p.fee_sheet_last_synced_at || "",
   };
 }
 
@@ -182,9 +181,7 @@ async function getMsAccessToken() {
 
   const json = await resp.json();
   if (!resp.ok) {
-    throw new Error(
-      `Microsoft token error: ${resp.status} ${JSON.stringify(json)}`
-    );
+    throw new Error(`Microsoft token error: ${resp.status} ${JSON.stringify(json)}`);
   }
 
   const accessToken = json.access_token || "";
@@ -275,20 +272,10 @@ async function graphFindChildByName(accessToken, driveId, parentId, fileName) {
   );
 
   const items = Array.isArray(json?.value) ? json.value : [];
-  return (
-    items.find(
-      (it) => (it?.name || "").toLowerCase() === fileName.toLowerCase()
-    ) || null
-  );
+  return items.find((it) => (it?.name || "").toLowerCase() === fileName.toLowerCase()) || null;
 }
 
-async function graphCopyDriveItemAndWait(
-  accessToken,
-  driveId,
-  itemId,
-  parentId,
-  newName
-) {
+async function graphCopyDriveItemAndWait(accessToken, driveId, itemId, parentId, newName) {
   const { resp } = await graphJson(
     accessToken,
     `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/copy`,
@@ -303,9 +290,7 @@ async function graphCopyDriveItemAndWait(
 
   const monitorUrl = resp.headers.get("location");
   if (!monitorUrl) {
-    throw new Error(
-      "Graph copy did not return a monitor URL (location header)."
-    );
+    throw new Error("Graph copy did not return a monitor URL (location header).");
   }
 
   const maxMs = 60_000;
@@ -340,13 +325,7 @@ function escapeODataString(s) {
   return String(s || "").replace(/'/g, "''");
 }
 
-async function graphGetRangeValues(
-  accessToken,
-  driveId,
-  itemId,
-  worksheetName,
-  address
-) {
+async function graphGetRangeValues(accessToken, driveId, itemId, worksheetName, address) {
   const ws = escapeODataString(worksheetName);
   const addr = escapeODataString(address);
 
@@ -359,8 +338,6 @@ async function graphGetRangeValues(
 }
 
 function normalizeCurrencyValue(v) {
-  // We expect Graph to give raw numbers for currency cells.
-  // HubSpot likes numbers as strings. Skip blanks.
   if (v === null || v === undefined) return null;
 
   if (typeof v === "number") return String(v);
@@ -368,12 +345,12 @@ function normalizeCurrencyValue(v) {
   const s = String(v).trim();
   if (!s) return null;
 
-  // Remove commas and $ just in case formatted strings sneak in
   const cleaned = s.replace(/[$,]/g, "").trim();
   if (!cleaned) return null;
 
   const n = Number(cleaned);
   if (Number.isNaN(n)) return null;
+
   return String(n);
 }
 
@@ -409,7 +386,6 @@ app.all("/api/fee-sheet", async (req, res) => {
 
     /**
      * ✅ FAST GET: never let Graph slow down the response.
-     * If Graph is slow, return HubSpot-only fields and the card still loads.
      */
     if (action === "get") {
       const meta = await withTimeout(
@@ -418,7 +394,6 @@ app.all("/api/fee-sheet", async (req, res) => {
         "HubSpot get timeout"
       );
 
-      // Always send these so UI doesn't flicker / default wrong
       const base = {
         feeSheetUrl: meta.feeSheetUrl || "",
         feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
@@ -429,6 +404,7 @@ app.all("/api/fee-sheet", async (req, res) => {
         readyForProposal: Boolean(meta.readyForProposal),
         readyBy: meta.readyBy || "",
         readyAt: meta.readyAt || "",
+        feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
         message: "Loaded (fast) ✅",
       };
 
@@ -444,20 +420,12 @@ app.all("/api/fee-sheet", async (req, res) => {
       }
 
       try {
-        const accessToken = await withTimeout(
-          getMsAccessToken(),
-          2500,
-          "MS token timeout"
-        );
+        const accessToken = await withTimeout(getMsAccessToken(), 2500, "MS token timeout");
 
         // Prefer IDs if available (faster/more reliable)
         if (meta.feeSheetDriveId && meta.feeSheetItemId) {
           const sp = await withTimeout(
-            graphGetDriveItemMetaByIds(
-              accessToken,
-              meta.feeSheetDriveId,
-              meta.feeSheetItemId
-            ),
+            graphGetDriveItemMetaByIds(accessToken, meta.feeSheetDriveId, meta.feeSheetItemId),
             2500,
             "Graph meta timeout"
           );
@@ -509,8 +477,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       const TEMPLATE_SHARE_LINK = process.env.TEMPLATE_SHARE_LINK;
       if (!TEMPLATE_SHARE_LINK) {
         return res.status(500).json({
-          message:
-            "Missing TEMPLATE_SHARE_LINK env var (SharePoint template share URL)",
+          message: "Missing TEMPLATE_SHARE_LINK env var (SharePoint template share URL)",
         });
       }
 
@@ -528,6 +495,7 @@ app.all("/api/fee-sheet", async (req, res) => {
           spCreatedAt: existing.feeSheetCreatedAt || "",
           spLastModifiedAt: "",
           readyForProposal: Boolean(existing.readyForProposal),
+          feeSheetLastSyncedAt: existing.feeSheetLastSyncedAt || "",
         });
       }
 
@@ -542,15 +510,11 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       const parent = templateItem?.parentReference;
       if (!parent?.driveId || !parent?.id) {
-        throw new Error(
-          "Could not determine template folder (parentReference missing)."
-        );
+        throw new Error("Could not determine template folder (parentReference missing).");
       }
 
       const dealName = await getDealName(dealId, hubspotToken);
-      const safeDealName = String(dealName)
-        .replace(/[\\/:*?"<>|]/g, "-")
-        .trim();
+      const safeDealName = String(dealName).replace(/[\\/:*?"<>|]/g, "-").trim();
 
       // Your exact naming rule:
       const fileName = `${safeDealName} - Fee Sheet Template-v05192025.xlsx`;
@@ -569,13 +533,11 @@ app.all("/api/fee-sheet", async (req, res) => {
           parent.driveId,
           existingItem.id
         );
-        if (!existingShareUrl) {
-          throw new Error("Found existing file but could not create share link.");
-        }
+        if (!existingShareUrl) throw new Error("Found existing file but could not create share link.");
 
         const createdAtMs = Date.now();
 
-        // ✅ Store driveId + itemId on the Deal
+        // ✅ Store driveId + itemId on the Deal (critical for fast Excel reads later)
         await hubspotPatchDeal(dealId, hubspotToken, {
           fee_sheet_url: existingShareUrl,
           fee_sheet_created_by: createdBySafe,
@@ -594,6 +556,7 @@ app.all("/api/fee-sheet", async (req, res) => {
           spCreatedAt: String(createdAtMs),
           spLastModifiedAt: "",
           readyForProposal: false,
+          feeSheetLastSyncedAt: "",
         });
       }
 
@@ -607,17 +570,12 @@ app.all("/api/fee-sheet", async (req, res) => {
       );
 
       // Create share link
-      const shareUrl = await graphCreateShareLink(
-        accessToken,
-        parent.driveId,
-        newItem.id
-      );
-      if (!shareUrl)
-        throw new Error("Could not create SharePoint share link for new file.");
+      const shareUrl = await graphCreateShareLink(accessToken, parent.driveId, newItem.id);
+      if (!shareUrl) throw new Error("Could not create SharePoint share link for new file.");
 
       const createdAtMs = Date.now();
 
-      // ✅ Store driveId + itemId on the Deal
+      // ✅ Store driveId + itemId on the Deal (critical for fast Excel reads later)
       await hubspotPatchDeal(dealId, hubspotToken, {
         fee_sheet_url: shareUrl,
         fee_sheet_created_by: createdBySafe,
@@ -636,22 +594,22 @@ app.all("/api/fee-sheet", async (req, res) => {
         spCreatedAt: String(createdAtMs),
         spLastModifiedAt: "",
         readyForProposal: false,
+        feeSheetLastSyncedAt: "",
       });
     }
 
     /**
      * ----------------------------
-     * NEW: action=refresh
+     * action=refresh
      * Reads Summary sheet cells and updates Deal properties (one-way Excel -> HubSpot)
+     * Also updates fee_sheet_last_synced_at (persisted)
      * ----------------------------
      */
     if (action === "refresh") {
       const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
 
       if (!meta?.feeSheetUrl) {
-        return res
-          .status(400)
-          .json({ message: "No fee sheet URL found on this deal." });
+        return res.status(400).json({ message: "No fee sheet URL found on this deal." });
       }
 
       const accessToken = await getMsAccessToken();
@@ -661,15 +619,12 @@ app.all("/api/fee-sheet", async (req, res) => {
       let itemId = meta.feeSheetItemId || "";
 
       if (!driveId || !itemId) {
-        const resolved = await graphGetDriveItemFromShareLink(
-          accessToken,
-          meta.feeSheetUrl
-        );
+        const resolved = await graphGetDriveItemFromShareLink(accessToken, meta.feeSheetUrl);
         driveId = resolved.parentDriveId || "";
         itemId = resolved.id || "";
 
         if (driveId && itemId) {
-          // save for next time (migration)
+          // Save for next time (migration)
           await hubspotPatchDeal(dealId, hubspotToken, {
             fee_sheet_drive_id: driveId,
             fee_sheet_item_id: itemId,
@@ -706,13 +661,10 @@ app.all("/api/fee-sheet", async (req, res) => {
         "C22:C22"
       );
 
-      // Flatten helpers (Graph returns 2D arrays)
+      // Flatten helper (Graph returns 2D arrays)
       const getCell = (values2d, r, c) =>
-        Array.isArray(values2d) && Array.isArray(values2d[r])
-          ? values2d[r][c]
-          : null;
+        Array.isArray(values2d) && Array.isArray(values2d[r]) ? values2d[r][c] : null;
 
-      // Map E13..E22 (rows 0..9)
       const mapped = {
         feas_totals: normalizeCurrencyValue(getCell(totalsValues, 0, 0)),
         survey_totals: normalizeCurrencyValue(getCell(totalsValues, 1, 0)),
@@ -728,7 +680,7 @@ app.all("/api/fee-sheet", async (req, res) => {
         phase_10_title: normalizeTextValue(getCell(titleValues, 0, 0)),
       };
 
-      // Only send non-null numeric fields; send text always (empty ok)
+      // Build patch payload
       const propertiesToPatch = {
         phase_10_title: mapped.phase_10_title,
       };
@@ -751,15 +703,21 @@ app.all("/api/fee-sheet", async (req, res) => {
         if (mapped[k] !== null) propertiesToPatch[k] = mapped[k];
       }
 
-      await hubspotPatchDeal(dealId, hubspotToken, propertiesToPatch);
+      // ✅ Persist last synced on the Deal
+      const nowIso = toIsoNow();
+
+      await hubspotPatchDeal(dealId, hubspotToken, {
+        ...propertiesToPatch,
+        fee_sheet_last_synced_at: nowIso,
+      });
 
       return res.json({
-        message: "Synced values from Fee Sheet → HubSpot ✅",
+        message: "Refreshed Deal values from Fee Sheet ✅",
         updated: propertiesToPatch,
+        feeSheetLastSyncedAt: nowIso,
       });
     }
 
-    // ✅ This must be LAST
     return res.status(400).json({ message: `Unknown action: ${action}` });
   } catch (err) {
     console.error("Server error:", err);
