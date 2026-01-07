@@ -2,8 +2,9 @@
   "uid": "FeeSheetGenerator_app",
   "type": "app",
   "config": {
-    "description": "An example to demonstrate how to build a static private app with developer projects.",
     "name": "Fee Sheet Generator-Application",
+    "description": "An example to demonstrate how to build a static private app with developer projects.",
+    "logo": "/app/app-logo.png",
     "distribution": "private",
     "auth": {
       "type": "static",
@@ -17,6 +18,7 @@
     },
     "permittedUrls": {
       "fetch": [
+        "https://fee-sheet-backend.onrender.com",
         "https://api.hubapi.com"
       ],
       "iframe": [],
@@ -30,3 +32,4 @@
     }
   }
 }
+
