@@ -12,6 +12,7 @@ const express = require("express");
 const cors = require("cors");
 
 const app = express();
+const DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID = 19;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -21,7 +22,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "REAL_BACKEND_WITH_LINEITEM_UPSERT_2026-01-12",
+    version: "ASSOC_V3_TYPEID_19_2026-01-12b",
     now: new Date().toISOString(),
   })
 );
@@ -102,19 +103,19 @@ const LINE_ITEM_RULES = [
   {
     key: "PERMITTING",
     dealProp: "permit_totals",
-    productSku: "PERMITTING", // <-- YOU MUST EDIT
+    productSku: "PERMITTING",
     quantity: 1,
   },
   {
     key: "CONSTR-ADMIN",
     dealProp: "constr_admin_totals",
-    productSku: "CONSTR-ADMIN", // <-- YOU MUST EDIT
+    productSku: "CONSTR-ADMIN",
     quantity: 1,
   },
   {
     key: "PHASE-10",
     dealProp: "phase_10_totals",
-    productSku: "PHASE-10", // <-- YOU MUST EDIT
+    productSku: "PHASE-10",
     quantity: 1,
   },
 ];
@@ -379,15 +380,32 @@ async function hubspotUpdateLineItem(lineItemId, token, properties) {
     throw new Error(`Update line item failed ${resp.status}: ${text}`);
 }
 
+// ✅ MUST MATCH YOUR labels result:
+const DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID = 19;
+
 async function hubspotAssociateLineItemToDeal(lineItemId, dealId, token) {
-  const resp = await fetch(
-    `https://api.hubapi.com/crm/v4/objects/line_items/${lineItemId}/associations/deals/${dealId}/line_items/default`,
-    { method: "PUT", headers: { Authorization: `Bearer ${token}` } }
-  );
+  const url = `https://api.hubapi.com/crm/v3/objects/deals/${dealId}/associations/line_items/${lineItemId}/${DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID}`;
+
+  console.log("ASSOC ATTEMPT", {
+    dealId,
+    lineItemId,
+    url,
+    typeId: DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID,
+  });
+
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}` },
+  });
 
   const text = await resp.text();
-  if (!resp.ok)
-    throw new Error(`Associate line item failed ${resp.status}: ${text}`);
+  if (!resp.ok) {
+    throw new Error(
+      `Associate line item failed ${resp.status}: ${
+        text || "(empty body)"
+      } | url=${url}`
+    );
+  }
 }
 
 async function hubspotDeleteLineItem(lineItemId, token) {
