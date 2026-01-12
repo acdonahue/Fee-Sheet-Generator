@@ -1,17 +1,31 @@
 /**
  * server.js (FULL FILE)
- * Adds: Deal property -> Line Item upsert when action=set-ready and ready=true
+ * Fee Sheet backend + "Ready for proposal" generates Deal line items from Deal totals
  *
  * YOU MUST EDIT / FILL OUT:
- *   (A) LINE_ITEM_RULES productSku values
+ *   (A) LINE_ITEM_RULES productSku values (must match Product Library SKUs)
  *   (B) AUTO_REFRESH_BEFORE_READY (true/false)
- *   (C) Ensure HubSpot line item property "fee_sheet_key" exists (recommended)
+ *   (C) Create HubSpot Line Item property "fee_sheet_key" (recommended)
+ *
+ * REQUIRED ENV VARS on Render:
+ *   HUBSPOT_TOKEN
+ *   MS_TENANT_ID
+ *   MS_CLIENT_ID
+ *   MS_CLIENT_SECRET
+ *   TEMPLATE_SHARE_LINK
+ *   (optional) SHARE_LINK_SCOPE ("organization" default)
  */
 
 const express = require("express");
 const cors = require("cors");
 
 const app = express();
+
+/**
+ * ✅ Deal -> Line Item association typeId
+ * You already confirmed this via the labels API:
+ * {"category":"HUBSPOT_DEFINED","typeId":19}
+ */
 const DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID = 19;
 
 app.use(cors());
@@ -22,7 +36,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "ASSOC_V3_TYPEID_19_2026-01-12b",
+    version: "ASSOC_V3_TYPEID_19_FIXED_NO_DUPLICATE_CONST_2026-01-12c",
     now: new Date().toISOString(),
   })
 );
@@ -32,11 +46,10 @@ app.get("/__version", (req, res) =>
  * YOU MUST EDIT THIS
  * ----------------------------
  * If true, clicking "Ready for proposal" will:
- *   1) run the Excel -> Deal property refresh (your existing logic)
+ *   1) run the Excel -> Deal property refresh
  *   2) then generate line items
  *
- * If false, "Ready" will only generate line items based on whatever values
- * are already on the Deal (requires user to click Refresh first, or values to be current).
+ * If false, "Ready" will only generate line items from current Deal props.
  */
 const AUTO_REFRESH_BEFORE_READY = true;
 
@@ -46,16 +59,12 @@ const AUTO_REFRESH_BEFORE_READY = true;
  * ----------------------------
  * Mapping of deal totals properties -> HubSpot products (by SKU) -> Deal line items.
  *
- * - key: stable id used to find/update/delete the generated line item
- * - dealProp: internal name of the Deal property that contains the numeric total
- * - productSku: SKU of the HubSpot Product in your Product Library
- * - quantity: usually 1 for a flat fee
- *
  * IMPORTANT:
- * - This implementation expects you to create a Line Item custom property:
+ * - Make sure these SKUs exist in Product Library (Settings > Objects > Products).
+ * - Recommended: create a Line Item custom property:
  *     Internal name: fee_sheet_key
  *     Type: single-line text
- *   so we can safely upsert without duplicates.
+ *   so we can upsert without duplicates.
  */
 const LINE_ITEM_RULES = [
   {
@@ -88,12 +97,7 @@ const LINE_ITEM_RULES = [
     productSku: "CONSTR-DOCS",
     quantity: 1,
   },
-  {
-    key: "FFE",
-    dealProp: "ffe_totals",
-    productSku: "FFE",
-    quantity: 1,
-  },
+  { key: "FFE", dealProp: "ffe_totals", productSku: "FFE", quantity: 1 },
   {
     key: "BIDDING",
     dealProp: "bid_totals",
@@ -186,12 +190,11 @@ async function hubspotGetDealProperties(dealId, token, properties) {
     { method: "GET", headers: { Authorization: `Bearer ${token}` } }
   );
 
-  if (!resp.ok) {
-    const text = await resp.text();
+  const text = await resp.text();
+  if (!resp.ok)
     throw new Error(`Failed to fetch deal properties: ${resp.status} ${text}`);
-  }
 
-  const json = await resp.json();
+  const json = safeJsonParse(text);
   return json?.properties || {};
 }
 
@@ -262,11 +265,6 @@ async function getDealName(dealId, token) {
 
 /**
  * ---- Line Item helpers ----
- * Uses:
- *  - Product lookup by SKU (cached)
- *  - Deal -> line item associations
- *  - Batch read of line items
- *  - Create/update/delete line items
  */
 const productIdCache = new Map(); // sku -> productId
 
@@ -359,6 +357,7 @@ async function hubspotCreateLineItem(token, properties) {
   const text = await resp.text();
   if (!resp.ok)
     throw new Error(`Create line item failed ${resp.status}: ${text}`);
+
   return safeJsonParse(text);
 }
 
@@ -380,17 +379,34 @@ async function hubspotUpdateLineItem(lineItemId, token, properties) {
     throw new Error(`Update line item failed ${resp.status}: ${text}`);
 }
 
-// ✅ MUST MATCH YOUR labels result:
-const DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID = 19;
+async function hubspotDeleteLineItem(lineItemId, token) {
+  const resp = await fetch(
+    `https://api.hubapi.com/crm/v3/objects/line_items/${lineItemId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
 
+  if (resp.status === 404) return;
+
+  const text = await resp.text();
+  if (!resp.ok)
+    throw new Error(`Delete line item failed ${resp.status}: ${text}`);
+}
+
+/**
+ * ✅ Associate (Deal -> Line Item) using v3 + typeId 19
+ * This is the URL format that matches the labels output you pasted.
+ */
 async function hubspotAssociateLineItemToDeal(lineItemId, dealId, token) {
   const url = `https://api.hubapi.com/crm/v3/objects/deals/${dealId}/associations/line_items/${lineItemId}/${DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID}`;
 
   console.log("ASSOC ATTEMPT", {
     dealId,
     lineItemId,
-    url,
     typeId: DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID,
+    url,
   });
 
   const resp = await fetch(url, {
@@ -408,22 +424,6 @@ async function hubspotAssociateLineItemToDeal(lineItemId, dealId, token) {
   }
 }
 
-async function hubspotDeleteLineItem(lineItemId, token) {
-  const resp = await fetch(
-    `https://api.hubapi.com/crm/v3/objects/line_items/${lineItemId}`,
-    {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    }
-  );
-
-  if (resp.status === 404) return;
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Delete line item failed ${resp.status}: ${text}`);
-  }
-}
-
 /**
  * Upsert fee sheet-driven line items based on deal totals properties.
  *
@@ -433,7 +433,7 @@ async function hubspotDeleteLineItem(lineItemId, token) {
  *  - If amount > 0: create or update the generated line item
  */
 async function upsertFeeSheetLineItems({ dealId, token }) {
-  // 1) read the totals from the deal
+  // 1) read totals from the deal
   const dealProps = await hubspotGetDealProperties(
     dealId,
     token,
@@ -443,7 +443,7 @@ async function upsertFeeSheetLineItems({ dealId, token }) {
   // 2) read existing line items on deal
   const ids = await hubspotListLineItemIdsForDeal(dealId, token);
 
-  // We rely on fee_sheet_key to find items reliably.
+  // 3) map existing by fee_sheet_key
   const existing = await hubspotBatchReadLineItems(token, ids, [
     "fee_sheet_key",
     "hs_product_id",
@@ -462,7 +462,6 @@ async function upsertFeeSheetLineItems({ dealId, token }) {
   for (const rule of LINE_ITEM_RULES) {
     const amount = toNumberOrZero(dealProps?.[rule.dealProp]);
     const shouldExist = amount > 0;
-
     const existingLi = byKey.get(rule.key);
 
     if (!shouldExist) {
@@ -486,7 +485,7 @@ async function upsertFeeSheetLineItems({ dealId, token }) {
       hs_product_id: String(productId),
       quantity: String(rule.quantity ?? 1),
       price: String(amount),
-      fee_sheet_key: rule.key, // requires your custom line item property
+      fee_sheet_key: rule.key,
     };
 
     if (existingLi?.id) {
@@ -501,7 +500,12 @@ async function upsertFeeSheetLineItems({ dealId, token }) {
         );
 
       await hubspotAssociateLineItemToDeal(String(newId), dealId, token);
-      changes.push({ key: rule.key, action: "created", amount });
+      changes.push({
+        key: rule.key,
+        action: "created",
+        amount,
+        lineItemId: String(newId),
+      });
     }
   }
 
@@ -511,15 +515,16 @@ async function upsertFeeSheetLineItems({ dealId, token }) {
 /**
  * ----------------------------
  * Microsoft Graph helpers
- * (Unchanged from your version)
  * ----------------------------
  */
 let msTokenCache = { token: "", expiresAtMs: 0 };
 
 async function getMsAccessToken() {
   const now = Date.now();
-  if (msTokenCache.token && msTokenCache.expiresAtMs - 60_000 > now)
+
+  if (msTokenCache.token && msTokenCache.expiresAtMs - 60_000 > now) {
     return msTokenCache.token;
+  }
 
   const tenantId = process.env.MS_TENANT_ID;
   const clientId = process.env.MS_CLIENT_ID;
@@ -622,10 +627,7 @@ async function graphCreateShareLink(accessToken, driveId, itemId) {
   const { json } = await graphJson(
     accessToken,
     `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/createLink`,
-    {
-      method: "POST",
-      body: JSON.stringify({ type, scope }),
-    }
+    { method: "POST", body: JSON.stringify({ type, scope }) }
   );
 
   return json?.link?.webUrl || "";
@@ -744,19 +746,15 @@ function normalizeTextValue(v) {
 /**
  * ----------------------------
  * Reusable refresh routine
- * (This is your existing refresh logic, moved into a function so set-ready can call it.)
  * ----------------------------
  */
 async function refreshDealFromFeeSheet({ dealId, hubspotToken }) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
-
-  if (!meta?.feeSheetUrl) {
+  if (!meta?.feeSheetUrl)
     throw new Error("No fee sheet URL found on this deal.");
-  }
 
   const accessToken = await getMsAccessToken();
 
-  // Prefer stored IDs; fallback to resolving share link for older deals
   let driveId = meta.feeSheetDriveId || "";
   let itemId = meta.feeSheetItemId || "";
 
@@ -779,7 +777,6 @@ async function refreshDealFromFeeSheet({ dealId, hubspotToken }) {
   if (!driveId || !itemId)
     throw new Error("Could not determine driveId/itemId for fee sheet.");
 
-  // Read ranges from Summary tab
   const totalsValues = await graphGetRangeValues(
     accessToken,
     driveId,
@@ -822,9 +819,7 @@ async function refreshDealFromFeeSheet({ dealId, hubspotToken }) {
     phase_10_title: normalizeTextValue(getCell(titleValues, 0, 0)),
   };
 
-  const propertiesToPatch = {
-    phase_10_title: mapped.phase_10_title,
-  };
+  const propertiesToPatch = { phase_10_title: mapped.phase_10_title };
 
   const numericKeys = [
     "feas_totals",
@@ -875,13 +870,10 @@ app.all("/api/fee-sheet", async (req, res) => {
     }
 
     const hubspotToken = process.env.HUBSPOT_TOKEN;
-    if (!hubspotToken) {
+    if (!hubspotToken)
       return res.status(500).json({ message: "Missing HUBSPOT_TOKEN secret" });
-    }
 
-    /**
-     * ✅ FAST GET: never let Graph slow down the response.
-     */
+    // ---- FAST GET ----
     if (action === "get") {
       const meta = await withTimeout(
         hubspotGetDealFeeSheetMeta(dealId, hubspotToken),
@@ -961,9 +953,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       }
     }
 
-    /**
-     * Accept BOTH action names (your UI currently sent "setReady" earlier)
-     */
+    // ---- READY / generate pricing ----
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
@@ -972,7 +962,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       let lineItemChanges = [];
 
       if (next) {
-        // Optional: refresh first to ensure deal props are current
         if (AUTO_REFRESH_BEFORE_READY) {
           refreshResult = await refreshDealFromFeeSheet({
             dealId,
@@ -980,7 +969,6 @@ app.all("/api/fee-sheet", async (req, res) => {
           });
         }
 
-        // Generate deal line items from deal totals
         lineItemChanges = await upsertFeeSheetLineItems({
           dealId,
           token: hubspotToken,
@@ -1003,13 +991,16 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
+    // ---- CREATE fee sheet ----
     if (action === "create") {
       const TEMPLATE_SHARE_LINK = process.env.TEMPLATE_SHARE_LINK;
       if (!TEMPLATE_SHARE_LINK) {
-        return res.status(500).json({
-          message:
-            "Missing TEMPLATE_SHARE_LINK env var (SharePoint template share URL)",
-        });
+        return res
+          .status(500)
+          .json({
+            message:
+              "Missing TEMPLATE_SHARE_LINK env var (SharePoint template share URL)",
+          });
       }
 
       const createdBySafe = createdBy || "Unknown user";
@@ -1038,11 +1029,10 @@ app.all("/api/fee-sheet", async (req, res) => {
       );
 
       const parent = templateItem?.parentReference;
-      if (!parent?.driveId || !parent?.id) {
+      if (!parent?.driveId || !parent?.id)
         throw new Error(
           "Could not determine template folder (parentReference missing)."
         );
-      }
 
       const dealName = await getDealName(dealId, hubspotToken);
       const safeDealName = String(dealName)
@@ -1133,9 +1123,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    /**
-     * action=refresh (unchanged externally, but now uses refreshDealFromFeeSheet())
-     */
+    // ---- REFRESH ----
     if (action === "refresh") {
       const result = await refreshDealFromFeeSheet({ dealId, hubspotToken });
       return res.json({
