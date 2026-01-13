@@ -1,28 +1,38 @@
 /**
- * server.js (FULL FILE REPLACEMENT — Input-DB line items + robust association + better debugging)
+ * server.js (FULL FILE REPLACEMENT)
  *
- * What this does:
- * - When Ready for proposal is clicked (action=set-ready, ready=true)
- *   → reads "Input-DB" B15:B160 and AC16:AC160
- *   → for rows 16-25, 31-40, 46-55, 61-70, 76-85, 91-100, 106-115, 121-130, 136-145, 150-160:
- *      - price = AC[row]
- *      - if price > 0: create/update custom line item (NO SKU) with:
- *          name = B[row] else B[row-1] else "Fee Sheet Row <row>"
- *          price = AC[row], quantity=1, fee_sheet_key = INPUT_DB_ROW_<row>
- *      - if price <= 0: delete previously-generated line item for that row key (if exists)
+ * - action=get:
+ *    returns fee sheet meta + SharePoint "last updated" info (Graph)
  *
- * Fixes included vs your pasted file:
- * ✅ Uses a dynamic Deal↔Line Item association typeId (no hard-coded 19)
- * ✅ PATCHES resolved driveId/itemId back onto the Deal (more reliable future reads)
- * ✅ Returns more useful info to the UI (lineItemSummary + debugSample)
- * ✅ Adds console logs you can view in Render logs when clicking Ready
+ * - action=set-ready (ready=true):
+ *    reads Input-DB!B15:B160 + Input-DB!AC16:AC160
+ *    for row blocks:
+ *      16-25, 31-40, 46-55, 61-70, 76-85, 91-100, 106-115,
+ *      121-130, 136-145, 150-160
+ *    creates/updates/deletes custom HubSpot line items (NO SKU)
+ *
+ * Naming rule:
+ *  - name = B[row] if present
+ *  - else name = B[blockHeaderRow] where blockHeaderRow = (blockStart - 1)
+ *    e.g. rows 16-25 fall back to B15
+ *
+ * Price rule:
+ *  - price = AC[row] (Excel computed)
+ *
+ * Required HubSpot setup (one-time):
+ *  - Line item property: fee_sheet_key (single-line text)
+ *
+ * Required env vars:
+ *  - HUBSPOT_TOKEN
+ *  - MS_TENANT_ID
+ *  - MS_CLIENT_ID
+ *  - MS_CLIENT_SECRET
  */
 
 const express = require("express");
 const cors = require("cors");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -31,7 +41,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "INPUT_DB_LINEITEMS_CUSTOM_NO_SKU_2026-01-13b",
+    version: "INPUT_DB_LINEITEMS_LASTUPDATED_FIX_2026-01-13c",
     now: new Date().toISOString(),
   })
 );
@@ -255,8 +265,7 @@ async function hubspotDeleteLineItem(lineItemId, token) {
 }
 
 /**
- * ✅ NEW: dynamically fetch the correct association typeId for deals ↔ line_items.
- * This avoids hardcoding "19", which can differ by portal/config.
+ * ✅ Dynamic association typeId: deals ↔ line_items
  */
 let assocTypeIdCache = null;
 
@@ -407,6 +416,20 @@ async function graphGetDriveItemFromShareLink(accessToken, shareLink) {
   };
 }
 
+async function graphGetDriveItemMetaByIds(accessToken, driveId, itemId) {
+  const { json } = await graphJson(
+    accessToken,
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}?$select=name,webUrl,lastModifiedDateTime,createdDateTime`
+  );
+
+  return {
+    name: json?.name || "",
+    webUrl: json?.webUrl || "",
+    lastModifiedDateTime: json?.lastModifiedDateTime || "",
+    createdDateTime: json?.createdDateTime || "",
+  };
+}
+
 function escapeODataString(s) {
   return String(s || "").replace(/'/g, "''");
 }
@@ -462,11 +485,18 @@ function buildTargetRows() {
   }
   return rows;
 }
-
 const TARGET_ROWS = buildTargetRows();
 
 function keyForRow(r) {
   return `INPUT_DB_ROW_${r}`;
+}
+
+// ✅ NEW: header-row fallback (blockStart - 1), e.g. 16–25 uses B15
+function getBlockHeaderRowFor(row) {
+  for (const [start, end] of INPUT_DB_ROW_BLOCKS) {
+    if (row >= start && row <= end) return start - 1;
+  }
+  return row - 1;
 }
 
 async function upsertInputDbLineItems({ dealId, hubspotToken }) {
@@ -476,7 +506,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
 
   const accessToken = await getMsAccessToken();
 
-  // Ensure drive/item IDs exist (resolve via share link if needed)
   let driveId = meta.feeSheetDriveId || "";
   let itemId = meta.feeSheetItemId || "";
 
@@ -491,14 +520,14 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     if (!driveId || !itemId)
       throw new Error("Could not determine driveId/itemId for fee sheet.");
 
-    // ✅ NEW: cache these back to the deal for future calls
+    // Cache IDs back to deal
     await hubspotPatchDeal(dealId, hubspotToken, {
       fee_sheet_drive_id: driveId,
       fee_sheet_item_id: itemId,
     });
   }
 
-  // Read needed ranges
+  // Read ranges
   const namesValues = await graphGetRangeValues(
     accessToken,
     driveId,
@@ -515,30 +544,25 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     "AC16:AC160"
   );
 
-  // ✅ Debug sample visible in Render logs
+  // Debug sample
   console.log("[Input-DB] sample read", {
     sheet: INPUT_DB_SHEET,
     driveId,
     itemId,
-    B45: getCell(namesValues, 45 - 15, 0),
-    B46: getCell(namesValues, 46 - 15, 0),
-    AC46: getCell(priceValues, 46 - 16, 0),
+    B15: getCell(namesValues, 15 - 15, 0),
+    B16: getCell(namesValues, 16 - 15, 0),
+    AC16: getCell(priceValues, 16 - 16, 0),
   });
 
-  // Map row -> name
+  // Map row->name and row->price
   const nameByRow = new Map();
   for (let row = 15; row <= 160; row++) {
-    const idx = row - 15;
-    const raw = getCell(namesValues, idx, 0);
-    nameByRow.set(row, normalizeText(raw));
+    nameByRow.set(row, normalizeText(getCell(namesValues, row - 15, 0)));
   }
 
-  // Map row -> price
   const priceByRow = new Map();
   for (let row = 16; row <= 160; row++) {
-    const idx = row - 16;
-    const raw = getCell(priceValues, idx, 0);
-    priceByRow.set(row, toNumberOrZero(raw));
+    priceByRow.set(row, toNumberOrZero(getCell(priceValues, row - 16, 0)));
   }
 
   // Existing line items indexed by fee_sheet_key
@@ -563,9 +587,10 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     const shouldExist = amount > 0;
 
     const directName = nameByRow.get(r) || "";
-    const fallbackName = nameByRow.get(r - 1) || "";
-    const finalName = directName || fallbackName || `Fee Sheet Row ${r}`;
+    const headerRow = getBlockHeaderRowFor(r);
+    const headerName = nameByRow.get(headerRow) || "";
 
+    const finalName = directName || headerName || `Fee Sheet Row ${r}`;
     const key = keyForRow(r);
     const existingLi = existingByKey.get(key);
 
@@ -594,9 +619,7 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
       const newId = created?.id;
       if (!newId) throw new Error(`Line item create returned no id (row ${r})`);
 
-      // ✅ Uses dynamic assoc typeId
       await hubspotAssociateLineItemToDeal(String(newId), dealId, hubspotToken);
-
       changes.push({
         row: r,
         key,
@@ -610,12 +633,11 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
 
   const summary = summarizeLineItemChanges(changes);
 
-  // Return a little sample to display in UI if needed
   const debugSample = {
     sheet: INPUT_DB_SHEET,
-    B46: nameByRow.get(46) || "",
-    B45: nameByRow.get(45) || "",
-    AC46: priceByRow.get(46) ?? 0,
+    B15: nameByRow.get(15) || "",
+    B16: nameByRow.get(16) || "",
+    AC16: priceByRow.get(16) ?? 0,
   };
 
   return { changes, summary, debugSample };
@@ -645,7 +667,10 @@ app.all("/api/fee-sheet", async (req, res) => {
     if (!hubspotToken)
       return res.status(500).json({ message: "Missing HUBSPOT_TOKEN secret" });
 
-    // ---- FAST GET ----
+    /**
+     * ---- GET ----
+     * Fill "lastUpdatedAt" by querying SharePoint file metadata via Graph.
+     */
     if (action === "get") {
       const meta = await withTimeout(
         hubspotGetDealFeeSheetMeta(dealId, hubspotToken),
@@ -653,11 +678,11 @@ app.all("/api/fee-sheet", async (req, res) => {
         "HubSpot get timeout"
       );
 
-      return res.json({
+      const base = {
         feeSheetUrl: meta.feeSheetUrl || "",
         feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
         feeSheetFileName: meta.feeSheetFileName || "",
-        lastUpdatedAt: "", // unchanged here; you can re-add SharePoint meta later if you want
+        lastUpdatedAt: "",
         spCreatedAt: meta.feeSheetCreatedAt || "",
         spLastModifiedAt: "",
         readyForProposal: Boolean(meta.readyForProposal),
@@ -665,10 +690,76 @@ app.all("/api/fee-sheet", async (req, res) => {
         readyAt: meta.readyAt || "",
         feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
         message: meta.feeSheetUrl ? "Loaded ✅" : "No fee sheet saved yet",
-      });
+      };
+
+      if (!meta?.feeSheetUrl) {
+        return res.json(base);
+      }
+
+      try {
+        const accessToken = await withTimeout(
+          getMsAccessToken(),
+          8000,
+          "MS token timeout"
+        );
+
+        let driveId = meta.feeSheetDriveId || "";
+        let itemId = meta.feeSheetItemId || "";
+
+        // Prefer ids if available
+        if (driveId && itemId) {
+          const sp = await withTimeout(
+            graphGetDriveItemMetaByIds(accessToken, driveId, itemId),
+            8000,
+            "Graph meta timeout"
+          );
+
+          return res.json({
+            ...base,
+            feeSheetFileName: meta.feeSheetFileName || sp.name || "",
+            lastUpdatedAt: sp.lastModifiedDateTime || "",
+            spCreatedAt: meta.feeSheetCreatedAt || sp.createdDateTime || "",
+            spLastModifiedAt: sp.lastModifiedDateTime || "",
+            message: "Loaded ✅",
+          });
+        }
+
+        // Otherwise resolve by share link
+        const resolved = await withTimeout(
+          graphGetDriveItemFromShareLink(accessToken, meta.feeSheetUrl),
+          8000,
+          "Graph share-link lookup timeout"
+        );
+
+        driveId = resolved.parentDriveId || "";
+        itemId = resolved.id || "";
+
+        // Cache to deal for next time
+        if (driveId && itemId) {
+          await hubspotPatchDeal(dealId, hubspotToken, {
+            fee_sheet_drive_id: driveId,
+            fee_sheet_item_id: itemId,
+          });
+        }
+
+        return res.json({
+          ...base,
+          feeSheetFileName: meta.feeSheetFileName || resolved.name || "",
+          lastUpdatedAt: resolved.lastModifiedDateTime || "",
+          spCreatedAt: meta.feeSheetCreatedAt || resolved.createdDateTime || "",
+          spLastModifiedAt: resolved.lastModifiedDateTime || "",
+          message: "Loaded ✅",
+        });
+      } catch (e) {
+        // If Graph fails, still return base so UI renders
+        console.log("[get] Graph meta failed:", e?.message || String(e));
+        return res.json(base);
+      }
     }
 
-    // ---- READY ----
+    /**
+     * ---- READY ----
+     */
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
