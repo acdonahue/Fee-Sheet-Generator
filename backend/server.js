@@ -760,6 +760,20 @@ app.all("/api/fee-sheet", async (req, res) => {
     /**
      * ---- READY ----
      */
+    // ---- SYNC LINE ITEMS (does NOT change Ready status) ----
+    if (action === "sync-line-items" || action === "syncLineItems") {
+      console.log("[sync-line-items] called", { dealId });
+
+      const result = await upsertInputDbLineItems({ dealId, hubspotToken });
+
+      return res.json({
+        message: `Synced line items ✅ (line items: +${result.summary.created} / ~${result.summary.updated} / -${result.summary.deleted})`,
+        lineItemSummary: result.summary,
+        lineItemChanges: result.changes,
+        debugSample: result.debugSample,
+      });
+    }
+
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
@@ -785,7 +799,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       return res.json({
         message: next
-          ? `Ready status updated ✅ (line items: +${lineItemSummary.created} / ~${lineItemSummary.updated} / -${lineItemSummary.deleted})`
+          ? `Ready status updated ✅ (new line items: ${lineItemSummary.created})`
           : "Ready status updated ✅",
         readyForProposal: next,
         lineItemSummary,

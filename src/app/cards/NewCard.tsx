@@ -405,7 +405,6 @@ function FeeSheetCard({ context }: { context: unknown }) {
                 {proposalSentLocked
                   ? relativeTime(readyAt || lastUpdatedAt)
                   : relativeTime(lastUpdatedAt || spLastModifiedAt)}
-
               </Text>
             </Flex>
 
