@@ -1,43 +1,27 @@
 /**
- * server.js (FULL FILE REPLACEMENT)
- * Fee Sheet backend + "Ready for proposal" generates Deal line items from Excel:
- * Worksheet: "Input-DB"
- * Rows: 16-25, 31-40, 46-55, 61-70, 76-85, 91-100, 106-115, 121-130, 136-145, 150-160
+ * server.js (FULL FILE REPLACEMENT — Input-DB line items + robust association + better debugging)
  *
- * Rule per row r:
- *   price = AC[r]  (Excel-calculated value)
- *   if price > 0:
- *     name = B[r] if populated else B[r-1]
- *     create or update a HubSpot Deal line item:
- *        name = name
- *        price = price
- *        quantity = 1
+ * What this does:
+ * - When Ready for proposal is clicked (action=set-ready, ready=true)
+ *   → reads "Input-DB" B15:B160 and AC16:AC160
+ *   → for rows 16-25, 31-40, 46-55, 61-70, 76-85, 91-100, 106-115, 121-130, 136-145, 150-160:
+ *      - price = AC[row]
+ *      - if price > 0: create/update custom line item (NO SKU) with:
+ *          name = B[row] else B[row-1] else "Fee Sheet Row <row>"
+ *          price = AC[row], quantity=1, fee_sheet_key = INPUT_DB_ROW_<row>
+ *      - if price <= 0: delete previously-generated line item for that row key (if exists)
  *
- * IMPORTANT SETUP IN HUBSPOT (ONE-TIME):
- *   Create a Line Item custom property:
- *     Label: Fee Sheet Key
- *     Internal name: fee_sheet_key
- *     Type: single-line text
- *
- * REQUIRED ENV VARS on Render:
- *   HUBSPOT_TOKEN
- *   MS_TENANT_ID
- *   MS_CLIENT_ID
- *   MS_CLIENT_SECRET
- *   TEMPLATE_SHARE_LINK
- *   (optional) SHARE_LINK_SCOPE ("organization" default)
+ * Fixes included vs your pasted file:
+ * ✅ Uses a dynamic Deal↔Line Item association typeId (no hard-coded 19)
+ * ✅ PATCHES resolved driveId/itemId back onto the Deal (more reliable future reads)
+ * ✅ Returns more useful info to the UI (lineItemSummary + debugSample)
+ * ✅ Adds console logs you can view in Render logs when clicking Ready
  */
 
 const express = require("express");
 const cors = require("cors");
 
 const app = express();
-
-/**
- * ✅ Deal -> Line Item association typeId
- * You confirmed this earlier via labels API: typeId 19
- */
-const DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID = 19;
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -47,7 +31,7 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/__version", (req, res) =>
   res.json({
-    version: "INPUT_DB_LINEITEMS_CUSTOM_NO_SKU_2026-01-13a",
+    version: "INPUT_DB_LINEITEMS_CUSTOM_NO_SKU_2026-01-13b",
     now: new Date().toISOString(),
   })
 );
@@ -77,7 +61,6 @@ function toIsoNow() {
 }
 
 function toNumberOrZero(v) {
-  // Handles numbers, "$1,234.56", "1,234", "", null, etc.
   const n = Number(
     String(v ?? "")
       .replace(/[$,]/g, "")
@@ -89,6 +72,18 @@ function toNumberOrZero(v) {
 function normalizeText(v) {
   if (v === null || v === undefined) return "";
   return String(v).trim();
+}
+
+function summarizeLineItemChanges(changes) {
+  const summary = { created: 0, updated: 0, deleted: 0, skipped: 0 };
+  for (const c of changes || []) {
+    const a = String(c?.action || "").toLowerCase();
+    if (a === "created") summary.created++;
+    else if (a === "updated") summary.updated++;
+    else if (a === "deleted") summary.deleted++;
+    else summary.skipped++;
+  }
+  return summary;
 }
 
 /**
@@ -260,10 +255,48 @@ async function hubspotDeleteLineItem(lineItemId, token) {
 }
 
 /**
- * ✅ Associate (Deal -> Line Item) using v3 + typeId 19
+ * ✅ NEW: dynamically fetch the correct association typeId for deals ↔ line_items.
+ * This avoids hardcoding "19", which can differ by portal/config.
  */
+let assocTypeIdCache = null;
+
+async function hubspotGetDealToLineItemAssocTypeId(token) {
+  if (assocTypeIdCache) return assocTypeIdCache;
+
+  const resp = await fetch(
+    "https://api.hubapi.com/crm/v4/associations/deals/line_items/labels",
+    { method: "GET", headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to fetch association labels: ${resp.status} ${text}`
+    );
+  }
+
+  const json = safeJsonParse(text);
+  const results = Array.isArray(json?.results) ? json.results : [];
+
+  const best =
+    results.find((r) =>
+      String(r?.label || "")
+        .toLowerCase()
+        .includes("deal")
+    ) || results[0];
+
+  if (!best?.typeId) {
+    throw new Error(`No association typeId found in labels response: ${text}`);
+  }
+
+  assocTypeIdCache = best.typeId;
+  return assocTypeIdCache;
+}
+
 async function hubspotAssociateLineItemToDeal(lineItemId, dealId, token) {
-  const url = `https://api.hubapi.com/crm/v3/objects/deals/${dealId}/associations/line_items/${lineItemId}/${DEAL_TO_LINE_ITEM_ASSOC_TYPE_ID}`;
+  const typeId = await hubspotGetDealToLineItemAssocTypeId(token);
+
+  const url = `https://api.hubapi.com/crm/v3/objects/deals/${dealId}/associations/line_items/${lineItemId}/${typeId}`;
 
   const resp = await fetch(url, {
     method: "PUT",
@@ -273,7 +306,9 @@ async function hubspotAssociateLineItemToDeal(lineItemId, dealId, token) {
   const text = await resp.text();
   if (!resp.ok) {
     throw new Error(
-      `Associate line item failed ${resp.status}: ${text || "(empty body)"}`
+      `Associate line item failed ${resp.status}: ${
+        text || "(empty body)"
+      } (typeId=${typeId})`
     );
   }
 }
@@ -407,7 +442,6 @@ function getCell(values2d, r, c) {
  */
 const INPUT_DB_SHEET = "Input-DB";
 
-// Build the explicit row list you provided
 const INPUT_DB_ROW_BLOCKS = [
   [16, 25],
   [31, 40],
@@ -431,7 +465,6 @@ function buildTargetRows() {
 
 const TARGET_ROWS = buildTargetRows();
 
-// fee_sheet_key value per row (stable for upsert)
 function keyForRow(r) {
   return `INPUT_DB_ROW_${r}`;
 }
@@ -454,14 +487,18 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     );
     driveId = resolved.parentDriveId || "";
     itemId = resolved.id || "";
+
     if (!driveId || !itemId)
       throw new Error("Could not determine driveId/itemId for fee sheet.");
-    // (Optional) you could PATCH these back to the deal if you want—omitted here for brevity.
+
+    // ✅ NEW: cache these back to the deal for future calls
+    await hubspotPatchDeal(dealId, hubspotToken, {
+      fee_sheet_drive_id: driveId,
+      fee_sheet_item_id: itemId,
+    });
   }
 
-  // We need:
-  // - B15:B160 (so each row can fall back to previous row)
-  // - AC16:AC160 (price cells)
+  // Read needed ranges
   const namesValues = await graphGetRangeValues(
     accessToken,
     driveId,
@@ -478,8 +515,17 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     "AC16:AC160"
   );
 
+  // ✅ Debug sample visible in Render logs
+  console.log("[Input-DB] sample read", {
+    sheet: INPUT_DB_SHEET,
+    driveId,
+    itemId,
+    B45: getCell(namesValues, 45 - 15, 0),
+    B46: getCell(namesValues, 46 - 15, 0),
+    AC46: getCell(priceValues, 46 - 16, 0),
+  });
+
   // Map row -> name
-  // B15 is index 0 in namesValues
   const nameByRow = new Map();
   for (let row = 15; row <= 160; row++) {
     const idx = row - 15;
@@ -488,7 +534,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
   }
 
   // Map row -> price
-  // AC16 is index 0 in priceValues
   const priceByRow = new Map();
   for (let row = 16; row <= 160; row++) {
     const idx = row - 16;
@@ -496,7 +541,7 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     priceByRow.set(row, toNumberOrZero(raw));
   }
 
-  // Read existing line items and index by fee_sheet_key
+  // Existing line items indexed by fee_sheet_key
   const existingIds = await hubspotListLineItemIdsForDeal(dealId, hubspotToken);
   const existing = await hubspotBatchReadLineItems(hubspotToken, existingIds, [
     "fee_sheet_key",
@@ -517,10 +562,9 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     const amount = priceByRow.get(r) ?? 0;
     const shouldExist = amount > 0;
 
-    // name: B[r] else B[r-1]
     const directName = nameByRow.get(r) || "";
     const fallbackName = nameByRow.get(r - 1) || "";
-    const finalName = directName || fallbackName;
+    const finalName = directName || fallbackName || `Fee Sheet Row ${r}`;
 
     const key = keyForRow(r);
     const existingLi = existingByKey.get(key);
@@ -535,24 +579,22 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
       continue;
     }
 
-    // If we have NO name at all, we still create something stable so it’s not blank
-    const safeName = finalName || `Fee Sheet Row ${r}`;
-
     const props = {
       fee_sheet_key: key,
-      name: safeName,
+      name: finalName,
       price: String(amount),
       quantity: "1",
     };
 
     if (existingLi?.id) {
       await hubspotUpdateLineItem(String(existingLi.id), hubspotToken, props);
-      changes.push({ row: r, key, action: "updated", amount, name: safeName });
+      changes.push({ row: r, key, action: "updated", amount, name: finalName });
     } else {
       const created = await hubspotCreateLineItem(hubspotToken, props);
       const newId = created?.id;
       if (!newId) throw new Error(`Line item create returned no id (row ${r})`);
 
+      // ✅ Uses dynamic assoc typeId
       await hubspotAssociateLineItemToDeal(String(newId), dealId, hubspotToken);
 
       changes.push({
@@ -560,13 +602,23 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
         key,
         action: "created",
         amount,
-        name: safeName,
+        name: finalName,
         lineItemId: String(newId),
       });
     }
   }
 
-  return changes;
+  const summary = summarizeLineItemChanges(changes);
+
+  // Return a little sample to display in UI if needed
+  const debugSample = {
+    sheet: INPUT_DB_SHEET,
+    B46: nameByRow.get(46) || "",
+    B45: nameByRow.get(45) || "",
+    AC46: priceByRow.get(46) ?? 0,
+  };
+
+  return { changes, summary, debugSample };
 }
 
 /**
@@ -597,7 +649,7 @@ app.all("/api/fee-sheet", async (req, res) => {
     if (action === "get") {
       const meta = await withTimeout(
         hubspotGetDealFeeSheetMeta(dealId, hubspotToken),
-        5000,
+        8000,
         "HubSpot get timeout"
       );
 
@@ -605,7 +657,7 @@ app.all("/api/fee-sheet", async (req, res) => {
         feeSheetUrl: meta.feeSheetUrl || "",
         feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
         feeSheetFileName: meta.feeSheetFileName || "",
-        lastUpdatedAt: "", // (kept for UI compatibility)
+        lastUpdatedAt: "", // unchanged here; you can re-add SharePoint meta later if you want
         spCreatedAt: meta.feeSheetCreatedAt || "",
         spLastModifiedAt: "",
         readyForProposal: Boolean(meta.readyForProposal),
@@ -621,14 +673,17 @@ app.all("/api/fee-sheet", async (req, res) => {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
 
-      let lineItemChanges = [];
+      console.log("[set-ready] called", { dealId, next, by });
 
-      // Only generate line items when switching to TRUE
+      let lineItemChanges = [];
+      let lineItemSummary = { created: 0, updated: 0, deleted: 0, skipped: 0 };
+      let debugSample = null;
+
       if (next) {
-        lineItemChanges = await upsertInputDbLineItems({
-          dealId,
-          hubspotToken,
-        });
+        const result = await upsertInputDbLineItems({ dealId, hubspotToken });
+        lineItemChanges = result.changes;
+        lineItemSummary = result.summary;
+        debugSample = result.debugSample;
       }
 
       await hubspotPatchDeal(dealId, hubspotToken, {
@@ -637,28 +692,17 @@ app.all("/api/fee-sheet", async (req, res) => {
         fee_sheet_ready_at: toIsoNow(),
       });
 
-      const createdCount = lineItemChanges.filter(
-        (c) => c.action === "created"
-      ).length;
-      const updatedCount = lineItemChanges.filter(
-        (c) => c.action === "updated"
-      ).length;
-      const deletedCount = lineItemChanges.filter(
-        (c) => c.action === "deleted"
-      ).length;
-
       return res.json({
         message: next
-          ? `Ready status updated ✅ (line items: +${createdCount} / ~${updatedCount} / -${deletedCount})`
+          ? `Ready status updated ✅ (line items: +${lineItemSummary.created} / ~${lineItemSummary.updated} / -${lineItemSummary.deleted})`
           : "Ready status updated ✅",
         readyForProposal: next,
+        lineItemSummary,
         lineItemChanges,
+        debugSample,
       });
     }
 
-    // ---- CREATE fee sheet (left as-is if you already have it elsewhere) ----
-    // If your current create/refresh logic is in this same server file already,
-    // keep it. If not, you can add it back here.
     return res.status(400).json({ message: `Unknown action: ${action}` });
   } catch (err) {
     console.error("Server error:", err);
