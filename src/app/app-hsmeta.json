@@ -11,7 +11,11 @@
       "requiredScopes": [
         "oauth",
         "crm.objects.deals.read",
-        "crm.objects.deals.write"
+        "crm.objects.deals.write",
+        "crm.objects.products.read",
+        "crm.objects.line_items.read",
+        "crm.objects.line_items.write",
+        "e-commerce"
       ],
       "optionalScopes": [],
       "conditionallyRequiredScopes": []
@@ -32,4 +36,3 @@
     }
   }
 }
-

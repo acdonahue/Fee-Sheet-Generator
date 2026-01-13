@@ -65,10 +65,14 @@
         "renderedExports": [
           "__hubSpotComponentRegistry",
           "Button",
+          "ButtonRow",
+          "Divider",
           "Image",
           "Link",
           "Text",
-          "Flex"
+          "Box",
+          "Flex",
+          "Icon"
         ]
       },
       {

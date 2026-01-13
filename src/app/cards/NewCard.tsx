@@ -1,5 +1,39 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { hubspot, Button, Text, Flex, Image, Icon } from "@hubspot/ui-extensions";
+import {
+  hubspot,
+  Button,
+  LoadingButton,
+  Text,
+  Flex,
+  Image,
+  Icon,
+  Link,
+  Box,
+  Divider,
+  ButtonRow,
+} from "@hubspot/ui-extensions";
+
+type HubSpotContext = {
+  crm?: { objectId?: string; recordId?: string };
+  objectId?: string;
+  user?: { firstName?: string; lastName?: string; email?: string };
+};
+
+type HubspotWithActions = {
+  actions?: {
+    openUrl?: (args: { url: string }) => Promise<void>;
+  };
+};
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
 
 hubspot.extend(({ context }) => <FeeSheetCard context={context} />);
 
@@ -45,21 +79,6 @@ function buildDotSvgDataUri(color: string) {
   return `data:image/svg+xml,${encoded}`;
 }
 
-/** external-link icon as SVG (guaranteed to render) */
-function buildExternalIconDataUri(color: string) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="none">
-    <path d="M10.5 1.5h4v4" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M14.5 1.5L8.5 7.5" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M6.5 3.5H5A2.5 2.5 0 0 0 2.5 6v5A2.5 2.5 0 0 0 5 13.5h5A2.5 2.5 0 0 0 12.5 11v-1.5" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-  </svg>`;
-
-  const encoded = encodeURIComponent(svg)
-    .replace(/'/g, "%27")
-    .replace(/"/g, "%22");
-
-  return `data:image/svg+xml,${encoded}`;
-}
-
 function StatusTag({
   label,
   tone = "warning",
@@ -67,11 +86,11 @@ function StatusTag({
   label: string;
   tone?: "warning" | "muted" | "success" | "error";
 }) {
-  const stylesByTone: Record<string, { dotColor: string; textColor: string }> = {
-    warning: { dotColor: "#F5C26B", textColor: "#7C98B6" },
-    muted: { dotColor: "#CBD5E1", textColor: "#7C98B6" },
-    success: { dotColor: "#22C55E", textColor: "#7C98B6" },
-    error: { dotColor: "#EF4444", textColor: "#7C98B6" },
+  const stylesByTone: Record<string, { dotColor: string }> = {
+    warning: { dotColor: "#F5C26B" },
+    muted: { dotColor: "#CBD5E1" },
+    success: { dotColor: "#22C55E" },
+    error: { dotColor: "#EF4444" },
   };
 
   const s = stylesByTone[tone] || stylesByTone.warning;
@@ -80,23 +99,16 @@ function StatusTag({
   return (
     <Flex direction="row" align="center" gap="xs">
       <Image src={dotSrc} alt="" width={10} />
-      <Text
-        style={{
-          fontSize: "12px",
-          lineHeight: "22px",
-          fontWeight: 300,
-          color: s.textColor,
-        }}
-      >
-        {label}
-      </Text>
+      <Text variant="microcopy">{label}</Text>
     </Flex>
   );
 }
 
 /* ---------- Card ---------- */
 
-function FeeSheetCard({ context }: { context: any }) {
+function FeeSheetCard({ context }: { context: unknown }) {
+  const ctx = context as HubSpotContext;
+
   const [status, setStatus] = useState("");
   const [isLoading, setIsLoading] = useState(true);
 
@@ -106,41 +118,46 @@ function FeeSheetCard({ context }: { context: any }) {
   const [lastUpdatedAt, setLastUpdatedAt] = useState("");
   const [spCreatedAt, setSpCreatedAt] = useState("");
   const [spLastModifiedAt, setSpLastModifiedAt] = useState("");
-  const [readyForProposal, setReadyForProposal] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState("");
 
-  const objectId =
-    context?.crm?.objectId ||
-    context?.crm?.recordId ||
-    context?.objectId ||
-    "";
+  // proposal metadata
+  const [readyAt, setReadyAt] = useState("");
+  const [readyBy, setReadyBy] = useState("");
+
+  const [isTogglingReady, setIsTogglingReady] = useState(false);
+  const [isSyncingNow, setIsSyncingNow] = useState(false);
+
+  // UI mode: when true, Ready stays disabled + Sync Now appears next to it
+  const [proposalSentLocked, setProposalSentLocked] = useState(false);
+
+  const objectId = ctx.crm?.objectId || ctx.crm?.recordId || ctx.objectId || "";
 
   const createdByForRequest = useMemo(() => {
-    const first = context?.user?.firstName || "";
-    const last = context?.user?.lastName || "";
-    return `${first} ${last}`.trim() || context?.user?.email || "Unknown user";
-  }, [context]);
+    const first = ctx.user?.firstName || "";
+    const last = ctx.user?.lastName || "";
+    return `${first} ${last}`.trim() || ctx.user?.email || "Unknown user";
+  }, [ctx.user?.firstName, ctx.user?.lastName, ctx.user?.email]);
 
   const canOpen = feeSheetUrl.startsWith("http");
 
   const openFeeSheet = async () => {
     if (!canOpen) return;
 
-    const anyHubspot: any = hubspot as any;
     try {
-      if (anyHubspot?.actions?.openUrl) {
-        await anyHubspot.actions.openUrl({ url: feeSheetUrl });
+      const hs = hubspot as unknown as HubspotWithActions;
+      if (hs.actions?.openUrl) {
+        await hs.actions.openUrl({ url: feeSheetUrl });
         return;
       }
-    } catch (e) {
-      // fall through
+    } catch {
+      // ignore and fall back
     }
 
     try {
       if (typeof window !== "undefined" && window?.open) {
         window.open(feeSheetUrl, "_blank", "noopener,noreferrer");
       }
-    } catch (e) {
+    } catch {
       setStatus("Could not open file from this card environment.");
     }
   };
@@ -162,6 +179,10 @@ function FeeSheetCard({ context }: { context: any }) {
   const computeStatus = () => {
     if (!feeSheetUrl) return null;
 
+    if (proposalSentLocked) {
+      return { tone: "success" as const, label: "Ready for proposal" };
+    }
+
     const c = new Date(spCreatedAt);
     const m = new Date(spLastModifiedAt);
 
@@ -173,7 +194,7 @@ function FeeSheetCard({ context }: { context: any }) {
     ) {
       const diff = Math.abs(m.getTime() - c.getTime());
       return diff <= 60_000
-        ? { tone: "muted" as const, label: "Not started" }
+        ? { tone: "error" as const, label: "Not started" }
         : { tone: "warning" as const, label: "In progress" };
     }
 
@@ -181,7 +202,6 @@ function FeeSheetCard({ context }: { context: any }) {
   };
 
   const statusDisplay = computeStatus();
-  const externalIconSrc = useMemo(() => buildExternalIconDataUri("#00A4BD"), []);
 
   async function loadFeeSheetMeta() {
     const body = await callBackend({
@@ -195,21 +215,51 @@ function FeeSheetCard({ context }: { context: any }) {
     setLastUpdatedAt(body?.lastUpdatedAt || "");
     setSpCreatedAt(body?.spCreatedAt || "");
     setSpLastModifiedAt(body?.spLastModifiedAt || "");
-    setReadyForProposal(Boolean(body?.readyForProposal));
     setLastSyncedAt(body?.feeSheetLastSyncedAt || "");
+
+    const serverReadyAt =
+      body?.fee_sheet_ready_at || body?.feeSheetReadyAt || body?.readyAt || "";
+    const serverReadyBy =
+      body?.fee_sheet_ready_by || body?.feeSheetReadyBy || body?.readyBy || "";
+
+    setReadyAt(serverReadyAt);
+    setReadyBy(serverReadyBy);
+
+    const backendReady = Boolean(body?.readyForProposal);
+    setProposalSentLocked(backendReady);
   }
 
+  // Initial load
   useEffect(() => {
     (async () => {
       try {
         await loadFeeSheetMeta();
-      } catch (e: any) {
-        setStatus(`Load error: ${e?.message || String(e)}`);
+      } catch (e: unknown) {
+        setStatus(`Load error: ${getErrorMessage(e)}`);
       } finally {
         setIsLoading(false);
       }
     })();
   }, []);
+
+  // Auto-poll to tighten up “HubSpot noticing changes”
+  // (only while the card is open)
+  useEffect(() => {
+    if (!canOpen) return;
+    if (isLoading) return;
+
+    const POLL_MS = 20_000;
+
+    const id = setInterval(() => {
+      // Don’t stomp on active operations
+      if (isTogglingReady || isSyncingNow) return;
+      loadFeeSheetMeta().catch(() => {
+        // silent: keep UI stable
+      });
+    }, POLL_MS);
+
+    return () => clearInterval(id);
+  }, [canOpen, isLoading, isTogglingReady, isSyncingNow, objectId]);
 
   async function onCreate() {
     try {
@@ -224,54 +274,106 @@ function FeeSheetCard({ context }: { context: any }) {
 
       setStatus(body?.message || "Created.");
       await loadFeeSheetMeta();
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      setStatus(`Error: ${getErrorMessage(e)}`);
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function onToggleReady() {
-    try {
-      const next = !readyForProposal;
-      setReadyForProposal(next);
+  // Sync now (pull Excel → deal properties) + refresh meta
+  async function onSyncNow() {
+    if (isSyncingNow || isTogglingReady || isLoading) return;
 
-      await callBackend({
-        action: "set-ready",
-        objectId: String(objectId),
-        ready: next ? "true" : "false",
-        updatedBy: createdByForRequest,
-      });
-    } catch (e: any) {
-      setReadyForProposal((v) => !v);
-      setStatus(`Error: ${e?.message || String(e)}`);
-    }
-  }
-
-  async function onRefreshFromExcel() {
     try {
-      setStatus("Syncing from fee sheet…");
+      setIsSyncingNow(true);
+      setStatus("Syncing now…");
 
       const body = await callBackend({
         action: "refresh",
         objectId: String(objectId),
       });
 
-      if (body?.feeSheetLastSyncedAt) {
+      if (body?.feeSheetLastSyncedAt)
         setLastSyncedAt(body.feeSheetLastSyncedAt);
-      }
 
       setStatus(body?.message || "Synced.");
       await loadFeeSheetMeta();
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      setStatus(`Error: ${getErrorMessage(e)}`);
+    } finally {
+      setIsSyncingNow(false);
+    }
+  }
+
+  // Ready for proposal
+  async function onSendProposal() {
+    if (isTogglingReady || proposalSentLocked) return;
+
+    try {
+      setIsTogglingReady(true);
+      setStatus("");
+
+      const body = await callBackend({
+        action: "set-ready",
+        objectId: String(objectId),
+        ready: "true",
+        updatedBy: createdByForRequest,
+      });
+
+      // Show the backend message + counts (if provided)
+      if (body?.lineItemSummary) {
+        const s = body.lineItemSummary;
+        setStatus(
+          `${body?.message || "Ready set."} Line items: +${s.created}, ~${
+            s.updated
+          }, -${s.deleted}`
+        );
+      } else {
+        setStatus(body?.message || "Ready set.");
+      }
+
+      // Lock immediately so UI swaps right away
+      setProposalSentLocked(true);
+
+      // Immediately pull latest meta (and show it)
+      await loadFeeSheetMeta();
+    } catch (e: unknown) {
+      setStatus(`Error: ${getErrorMessage(e)}`);
+    } finally {
+      setIsTogglingReady(false);
+    }
+  }
+
+  // Go back to editing
+  async function onGoBackToEditing() {
+    if (isTogglingReady) return;
+
+    try {
+      setIsTogglingReady(true);
+      setStatus("");
+
+      await callBackend({
+        action: "set-ready",
+        objectId: String(objectId),
+        ready: "false",
+        updatedBy: createdByForRequest,
+      });
+
+      setProposalSentLocked(false);
+      await loadFeeSheetMeta();
+    } catch (e: unknown) {
+      setStatus(`Error: ${getErrorMessage(e)}`);
+      setProposalSentLocked(true);
+    } finally {
+      setIsTogglingReady(false);
     }
   }
 
   return (
-    <Flex direction="column" gap="md" style={{ width: "100%" }}>
+    <Flex direction="column" gap="sm">
       {isLoading ? (
-        <Text size="sm">Loading fee sheet…</Text>
+        <Text variant="bodytext">Loading fee sheet…</Text>
       ) : !canOpen ? (
         <Button onClick={onCreate}>Create Fee Sheet</Button>
       ) : (
@@ -280,127 +382,110 @@ function FeeSheetCard({ context }: { context: any }) {
             <StatusTag label={statusDisplay.label} tone={statusDisplay.tone} />
           )}
 
-          {/* File row */}
-          <Flex
-            direction="row"
-            justify="start"
-            align="start"
-            gap="sm"
-            style={{
-              width: "100%",
-              padding: "10px",
-              border: "1px solid #E5E7EB",
-              borderRadius: "8px",
-            }}
-          >
-            <Image
-              src={EXCEL_ICON_URL}
-              alt="Excel"
-              width={50}
-              style={{ flexShrink: 0 }}
-            />
-
-            <Flex
-              direction="column"
-              gap="xs"
-              style={{ width: "100%", flexGrow: 1, minWidth: 0 }}
-            >
-              {/* Title row: teal "link-like" text + inline open icon */}
-              <Flex
-                direction="row"
-                align="center"
-                gap="xs"
-                style={{ width: "100%", minWidth: 0 }}
+          {/* File tile */}
+          <Box flex="initial">
+            <Flex direction="row" align="baseline" gap="xs">
+              <Image src={EXCEL_ICON_URL} alt="Excel" width={32} />
+              <Link
+                href={{ url: feeSheetUrl, external: true }}
+                onClick={openFeeSheet}
               >
-                <Text
-                  size="md"
-                  format={{ fontWeight: "bold" }}
-                  onClick={openFeeSheet}
-                  style={{
-                    color: "#00A4BD",
-                    cursor: "pointer",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    minWidth: 0,
-                    flexGrow: 1,
-                    textDecoration: "none",
-                  }}
-                  onMouseEnter={(e) => {
-                    const el = e.target as HTMLElement;
-                    el.style.textDecoration = "underline";
-                  }}
-                  onMouseLeave={(e) => {
-                    const el = e.target as HTMLElement;
-                    el.style.textDecoration = "none";
-                  }}
-                >
-                  {feeSheetFileName || "Fee Sheet"}
-                </Text>
+                {feeSheetFileName || "Fee Sheet"}
+              </Link>
+            </Flex>
+          </Box>
 
-                <Image
-                  src={externalIconSrc}
-                  alt="Open"
-                  width={14}
-                  style={{ flexShrink: 0, cursor: "pointer" }}
-                  onClick={openFeeSheet}
-                />
-              </Flex>
+          {/* Meta block */}
+          <Flex direction="column">
+            <Flex direction="row" gap="xs" align="baseline">
+              <Text variant="microcopy" format={{ fontWeight: "bold" }}>
+                {proposalSentLocked ? "Marked ready:" : "Last updated:"}
+              </Text>
+              <Text variant="microcopy">
+                {proposalSentLocked
+                  ? relativeTime(readyAt || lastUpdatedAt)
+                  : relativeTime(lastUpdatedAt || spLastModifiedAt)}
 
-              {/* Bold label, regular value */}
-              <Flex direction="row" gap="xs" align="baseline" style={{ minWidth: 0 }}>
-                <Text
-                  size="xs"
-                  format={{ fontWeight: "bold" }}
-                  style={{ color: "#6B7280" }}
-                >
-                  Last updated:
-                </Text>
-                <Text size="xs" style={{ color: "#6B7280" }}>
-                  {relativeTime(lastUpdatedAt)}
-                </Text>
-              </Flex>
+              </Text>
+            </Flex>
 
-              <Flex direction="row" gap="xs" align="baseline" style={{ minWidth: 0 }}>
-                <Text
-                  size="xs"
-                  format={{ fontWeight: "bold" }}
-                  style={{ color: "#6B7280" }}
-                >
-                  Created by:
-                </Text>
-                <Text size="xs" style={{ color: "#6B7280" }}>
-                  {feeSheetCreatedBy || "—"}
-                </Text>
-              </Flex>
+            <Flex direction="row" gap="xs" align="baseline">
+              <Text variant="microcopy" format={{ fontWeight: "bold" }}>
+                {proposalSentLocked ? "Completed by:" : "Created by:"}
+              </Text>
+              <Text variant="microcopy">
+                {proposalSentLocked ? readyBy || "—" : feeSheetCreatedBy || "—"}
+              </Text>
             </Flex>
           </Flex>
 
+          <Divider />
+
           {/* Actions */}
           <Flex direction="column" gap="xs">
-            <Button size="xs" variant="secondary" onClick={onRefreshFromExcel}>
-              <Icon name="dataSync" /> Sync fee sheet updates
-            </Button>
+            <ButtonRow>
+              {!proposalSentLocked ? (
+                <LoadingButton
+                  variant="primary"
+                  onClick={onSendProposal}
+                  loading={isTogglingReady}
+                  disabled={isLoading || proposalSentLocked || isSyncingNow}
+                  resultIconName="success"
+                >
+                  <Icon name="notification" />
+                  Ready for proposal
+                </LoadingButton>
+              ) : (
+                <>
+                  {/* Disabled Ready button with SUCCESS icon */}
+                  <Button variant="primary" disabled={true}>
+                    <Icon name="success" />
+                    Ready for proposal
+                  </Button>
 
-            <Text size="xs" style={{ color: "#6B7280", lineHeight: "16px" }}>
-              Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "—"}
-            </Text>
+                  {/* Sync now button (does refresh + reload) */}
+                  <LoadingButton
+                    variant="secondary"
+                    onClick={onSyncNow}
+                    loading={isSyncingNow}
+                    disabled={isTogglingReady || isLoading}
+                    resultIconName="success"
+                  >
+                    <Icon name="refresh" />
+                    Sync now
+                  </LoadingButton>
 
-            <Text size="sm" onClick={onToggleReady} format={{ fontWeight: "bold" }}>
-              {readyForProposal ? "☑ ready for proposal" : "☐ ready for proposal"}
-            </Text>
+                  <Button
+                    variant="transparent"
+                    size="xs"
+                    onClick={onGoBackToEditing}
+                    disabled={isTogglingReady || isSyncingNow}
+                  >
+                    Reopen for edits
+                  </Button>
+                </>
+              )}
+            </ButtonRow>
 
-            <Text size="xs" style={{ color: "#6B7280", marginTop: "-4px" }}>
-              🔔 posts to #proposals
-            </Text>
+            {/* Helper line */}
+            {proposalSentLocked ? (
+              <Flex direction="row" align="baseline" gap="xs">
+                <Text variant="microcopy">
+                  Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "—"}
+                </Text>
+              </Flex>
+            ) : (
+              <Flex direction="row" align="center" gap="xs">
+                <Text variant="microcopy">Posts to #proposals</Text>
+              </Flex>
+            )}
           </Flex>
         </>
       )}
 
-      {status && <Text size="sm">{status}</Text>}
+      {status && <Text variant="bodytext">{status}</Text>}
     </Flex>
   );
 }
 
 export default FeeSheetCard;
-
