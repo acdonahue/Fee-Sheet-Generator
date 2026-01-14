@@ -3,7 +3,7 @@
 /**
  * backend/server.js (FULL FILE REPLACEMENT — CommonJS for Render)
  *
- * Current behavior:
+ * Behavior:
  * ✅ action=get: returns FLAT fields expected by NewCard.tsx
  * ✅ action=create: (optional) copy template -> dest folder, save link/meta to deal
  * ✅ action=refresh: sync Input-DB line items + set deal amount from Summary!J7 + update last synced
@@ -16,6 +16,11 @@
  *    - map fee_sheet_key -> line item
  * ✅ “Ready” is fast even during a long Sync:
  *    - set-ready uses a NO-QUEUE HubSpot patch (doesn’t wait behind sync’s serialized queue)
+ *
+ * Fix for your current 404:
+ * ✅ When creating a line item, we create it ALREADY associated to the deal
+ *    (no separate v4 association call).
+ *    HubSpot supports associations array on POST /crm/v3/objects/line_items. :contentReference[oaicite:1]{index=1}
  *
  * Required Render env vars:
  * - HUBSPOT_PRIVATE_APP_TOKEN (preferred)  [or HUBSPOT_TOKEN]
@@ -97,7 +102,6 @@ function chunkArray(arr, size) {
 // HubSpot fetch + throttling + 429 retry (queued)
 // ---------------------------
 
-// Serialize HubSpot calls so sync work doesn’t burst above “secondly” limits.
 let hsQueue = Promise.resolve();
 let hsLastCallAt = 0;
 
@@ -132,9 +136,10 @@ async function hsFetch(path, { method = "GET", token, body } = {}) {
 
   if (!res.ok) {
     const msg = json?.message || text || `HubSpot error ${res.status}`;
-    const err = new Error(msg);
+    const err = new Error(`${msg} (path: ${path})`);
     err.status = res.status;
     err.payload = json;
+    err.path = path;
     const retryAfter = res.headers.get("retry-after");
     err.retryAfterSeconds = retryAfter ? Number(retryAfter) : 0;
     throw err;
@@ -177,8 +182,6 @@ async function hsFetchWithRetry(path, opts = {}, retries = 6) {
 // ---------------------------
 // HubSpot fast lane (NO queue)
 // ---------------------------
-// Use this ONLY for fast single-shot actions (like set-ready) so they don’t wait
-// behind a long-running sync that is using hsQueue.
 
 async function hsFetchWithRetryNoQueue(path, opts = {}, retries = 4) {
   try {
@@ -310,9 +313,10 @@ async function graphFetch(accessToken, path, { method = "GET", body } = {}) {
 
   if (!res.ok) {
     const msg = json?.error?.message || text || `Graph error ${res.status}`;
-    const err = new Error(msg);
+    const err = new Error(`${msg} (path: ${path})`);
     err.status = res.status;
     err.payload = json;
+    err.path = path;
     throw err;
   }
 
@@ -616,6 +620,7 @@ const INPUT_DB_BLOCKS = [
 ];
 
 async function hsGetDealAssociatedLineItemIds(token, dealId) {
+  // associations query param is supported on the object read endpoint
   const deal = await hsFetchWithRetry(
     `/crm/v3/objects/deals/${dealId}?associations=line_items`,
     { token }
@@ -626,7 +631,6 @@ async function hsGetDealAssociatedLineItemIds(token, dealId) {
 
 async function hsBatchReadLineItems(token, ids) {
   if (!ids.length) return [];
-  // HubSpot batch read commonly supports 100 per call; chunk to be safe.
   const chunks = chunkArray(ids, 100);
   const all = [];
 
@@ -663,11 +667,28 @@ async function buildExistingLineItemMapForDeal(token, dealId) {
   return map;
 }
 
-async function hsCreateLineItem(token, props) {
+// NOTE: Create-and-associate in ONE call (no separate association endpoint).
+// HubSpot docs show associationTypeId 20 for line_item -> deal. :contentReference[oaicite:2]{index=2}
+async function hsCreateLineItemAndAssociateToDeal(token, dealId, props) {
+  const body = {
+    properties: props,
+    associations: [
+      {
+        to: { id: String(dealId) },
+        types: [
+          {
+            associationCategory: "HUBSPOT_DEFINED",
+            associationTypeId: 20,
+          },
+        ],
+      },
+    ],
+  };
+
   return hsFetchWithRetry(`/crm/v3/objects/line_items`, {
     method: "POST",
     token,
-    body: { properties: props },
+    body,
   });
 }
 
@@ -684,13 +705,6 @@ async function hsDeleteLineItem(token, lineItemId) {
     method: "DELETE",
     token,
   });
-}
-
-async function hsAssociateLineItemToDeal(token, dealId, lineItemId) {
-  return hsFetchWithRetry(
-    `/crm/v4/objects/deals/${dealId}/associations/line_items/${lineItemId}/deal_to_line_item`,
-    { method: "PUT", token }
-  );
 }
 
 function getBlockFallbackName(namesValues, blockStartRow) {
@@ -780,7 +794,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
       const name = rowName || fallback || `Row ${r}`;
 
       const shouldExist = amount > 0;
-
       const existingItem = existingMap.get(feeSheetKey) || null;
 
       if (!shouldExist) {
@@ -813,12 +826,14 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
           name,
         });
       } else {
-        const created = await hsCreateLineItem(hubspotToken, props);
+        const created = await hsCreateLineItemAndAssociateToDeal(
+          hubspotToken,
+          dealId,
+          props
+        );
         const lineItemId = created?.id;
 
         if (lineItemId) {
-          await hsAssociateLineItemToDeal(hubspotToken, dealId, lineItemId);
-          // Keep map current (use minimal structure)
           existingMap.set(feeSheetKey, {
             id: lineItemId,
             properties: { fee_sheet_key: feeSheetKey },
@@ -874,13 +889,11 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.status(400).json({ message: "Missing dealId/objectId." });
     }
 
-    // ---- GET (flat shape expected by card) ----
     if (action === "get") {
       const flat = await buildFlatCardMeta(dealId, HUBSPOT_TOKEN);
       return res.json(flat);
     }
 
-    // ---- CREATE (card calls action=create) ----
     if (action === "create") {
       const out = await createFeeSheetFromTemplate({
         dealId,
@@ -890,7 +903,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.json(out);
     }
 
-    // ---- REFRESH (sync line items + set amount from Summary!J7) ----
     if (action === "refresh") {
       const result = await upsertInputDbLineItems({
         dealId,
@@ -924,7 +936,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    // ---- Ready for proposal (FAST ONLY, uses fast-lane patch) ----
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
@@ -953,6 +964,7 @@ app.all("/api/fee-sheet", async (req, res) => {
     return res.status(status).json({
       message: "Server error",
       error: err?.message || String(err),
+      path: err?.path || undefined,
     });
   }
 });
