@@ -1,10 +1,7 @@
+/* eslint-env node */
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
- * server.js (FULL FILE REPLACEMENT — ESM + ESLint-friendly)
- *
- * Fixes:
- * - Render ESM compatibility (still requires backend to run as ESM: "type":"module" or .mjs)
- * - ESLint: no require(), no implicit globals (Buffer/process imported)
- * - ESLint: no-unused-vars for catch blocks (remove catch param entirely)
+ * backend/server.js (FULL FILE REPLACEMENT — CommonJS for Render)
  *
  * Behavior:
  * - action=get:
@@ -19,11 +16,10 @@
  *    sync line items without toggling ready
  */
 
-import process from "process";
-import { Buffer } from "buffer";
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
+// CommonJS imports (Render default)
+const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
 
 dotenv.config();
 
@@ -281,6 +277,7 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   );
   const raw = getCell(values, 0, 0);
 
+  // If blank/null, don't overwrite deal amount
   if (raw === null || raw === undefined || String(raw).trim() === "") {
     return { raw, amount: null };
   }
@@ -314,11 +311,7 @@ async function hsSearchLineItemsByKey(token, feeSheetKey) {
     filterGroups: [
       {
         filters: [
-          {
-            propertyName: "fee_sheet_key",
-            operator: "EQ",
-            value: feeSheetKey,
-          },
+          { propertyName: "fee_sheet_key", operator: "EQ", value: feeSheetKey },
         ],
       },
     ],
@@ -424,6 +417,7 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     AC16: getCell(priceValues, 0, 0),
   };
 
+  // Map rows 16..160 -> prices (145 rows)
   const priceByRow = new Map();
   for (let i = 0; i < 145; i++) {
     const rowNumber = 16 + i;
@@ -515,8 +509,7 @@ app.get("/", (_req, res) => {
 
 app.all("/api/fee-sheet", async (req, res) => {
   try {
-    const hubspotToken = HUBSPOT_TOKEN;
-    if (!hubspotToken) {
+    if (!HUBSPOT_TOKEN) {
       return res
         .status(500)
         .json({ message: "Missing HUBSPOT_PRIVATE_APP_TOKEN env var." });
@@ -535,12 +528,15 @@ app.all("/api/fee-sheet", async (req, res) => {
     }
 
     if (action === "get") {
-      const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
+      const meta = await hubspotGetDealFeeSheetMeta(dealId, HUBSPOT_TOKEN);
       return res.json({ message: "ok", meta });
     }
 
     if (action === "sync-line-items" || action === "syncLineItems") {
-      const result = await upsertInputDbLineItems({ dealId, hubspotToken });
+      const result = await upsertInputDbLineItems({
+        dealId,
+        hubspotToken: HUBSPOT_TOKEN,
+      });
       return res.json({
         message: `Line items synced ✅ (+${result.summary.created} ~${result.summary.updated} -${result.summary.deleted}, skipped ${result.summary.skipped})`,
         lineItemSummary: result.summary,
@@ -559,13 +555,20 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       let summaryAmount = null;
 
+      // Only do the expensive stuff when setting ready=true
       if (next) {
-        const result = await upsertInputDbLineItems({ dealId, hubspotToken });
+        const result = await upsertInputDbLineItems({
+          dealId,
+          hubspotToken: HUBSPOT_TOKEN,
+        });
         lineItemChanges = result.changes;
         lineItemSummary = result.summary;
         debugSample = result.debugSample;
 
-        const j7 = await getSummaryJ7Amount({ dealId, hubspotToken });
+        const j7 = await getSummaryJ7Amount({
+          dealId,
+          hubspotToken: HUBSPOT_TOKEN,
+        });
         summaryAmount = j7.amount; // null if blank
       }
 
@@ -580,7 +583,7 @@ app.all("/api/fee-sheet", async (req, res) => {
         patchProps.amount = String(summaryAmount);
       }
 
-      await hubspotPatchDeal(dealId, hubspotToken, patchProps);
+      await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, patchProps);
 
       return res.json({
         message: next
