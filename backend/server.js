@@ -3,9 +3,13 @@
 /**
  * backend/server.js (FULL FILE REPLACEMENT — CommonJS for Render)
  *
- * Behavior:
+ * Actions expected by the HubSpot card:
  * - action=get:
- *    returns deal fee sheet meta
+ *    returns fee sheet meta in a FLAT shape (feeSheetUrl, feeSheetFileName, etc.)
+ * - action=create:
+ *    creates a fee sheet from a template (if env vars are provided) and saves link/meta to the deal
+ * - action=refresh:
+ *    sync line items (Input-DB) and updates "last synced" fields
  * - action=set-ready (ready=true):
  *    1) sync line items from Input-DB
  *    2) read Summary!J7 and write it to deal property "amount"
@@ -19,6 +23,7 @@
 // CommonJS imports (Render default)
 const express = require("express");
 const cors = require("cors");
+
 // Optional dotenv for local dev; Render provides env vars without it.
 try {
   require("dotenv").config();
@@ -34,10 +39,19 @@ app.use(express.json({ limit: "2mb" }));
 // Env / constants
 // ---------------------------
 
-const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || "";
+// Accept either name to avoid “it worked yesterday” Render env mismatches
+const HUBSPOT_TOKEN =
+  process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_TOKEN || "";
+
 const MS_TENANT_ID = process.env.MS_TENANT_ID || "";
 const MS_CLIENT_ID = process.env.MS_CLIENT_ID || "";
 const MS_CLIENT_SECRET = process.env.MS_CLIENT_SECRET || "";
+
+// OPTIONAL (only needed if you want backend to create the file from a template)
+const FEE_SHEET_TEMPLATE_SHARE_URL =
+  process.env.FEE_SHEET_TEMPLATE_SHARE_URL || "";
+const FEE_SHEET_DEST_FOLDER_SHARE_URL =
+  process.env.FEE_SHEET_DEST_FOLDER_SHARE_URL || "";
 
 // HubSpot API base
 const HS_BASE = "https://api.hubapi.com";
@@ -61,6 +75,10 @@ function toNumberOrZero(value) {
   const cleaned = String(value).replace(/[$,]/g, "").trim();
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ---------------------------
@@ -105,39 +123,42 @@ async function hubspotPatchDeal(dealId, token, properties) {
   });
 }
 
+async function hubspotGetDealRaw(dealId, token, propertiesList) {
+  const data = await hsFetch(
+    `/crm/v3/objects/deals/${dealId}?properties=${encodeURIComponent(
+      propertiesList.join(",")
+    )}`,
+    { token }
+  );
+  return data?.properties || {};
+}
+
 async function hubspotGetDealFeeSheetMeta(dealId, token) {
   const props = [
     "fee_sheet_url",
     "fee_sheet_drive_id",
     "fee_sheet_item_id",
     "fee_sheet_last_synced_at",
+    "fee_sheet_last_synced_by",
     "fee_sheet_ready_for_proposal",
     "fee_sheet_ready_by",
     "fee_sheet_ready_at",
     "fee_sheet_file_name",
     "fee_sheet_created_by",
     "fee_sheet_created_at",
-    "fee_sheet_last_synced_by",
-    "fee_sheet_last_synced_at",
   ];
 
-  const data = await hsFetch(
-    `/crm/v3/objects/deals/${dealId}?properties=${encodeURIComponent(
-      props.join(",")
-    )}`,
-    { token }
-  );
+  const p = await hubspotGetDealRaw(dealId, token, props);
 
-  const p = data?.properties || {};
   return {
     feeSheetUrl: p.fee_sheet_url || "",
     feeSheetDriveId: p.fee_sheet_drive_id || "",
     feeSheetItemId: p.fee_sheet_item_id || "",
-    fileName: p.fee_sheet_file_name || "",
-    createdBy: p.fee_sheet_created_by || "",
-    createdAt: p.fee_sheet_created_at || "",
-    lastSyncedBy: p.fee_sheet_last_synced_by || "",
-    lastSyncedAt: p.fee_sheet_last_synced_at || "",
+    feeSheetFileName: p.fee_sheet_file_name || "",
+    feeSheetCreatedBy: p.fee_sheet_created_by || "",
+    feeSheetCreatedAt: p.fee_sheet_created_at || "",
+    feeSheetLastSyncedAt: p.fee_sheet_last_synced_at || "",
+    feeSheetLastSyncedBy: p.fee_sheet_last_synced_by || "",
     readyForProposal:
       String(p.fee_sheet_ready_for_proposal || "").toLowerCase() === "true",
     readyBy: p.fee_sheet_ready_by || "",
@@ -216,6 +237,7 @@ async function graphGetDriveItemFromShareLink(accessToken, shareUrl) {
 
   const token = `u!${base64}`;
   const json = await graphFetch(accessToken, `/shares/${token}/driveItem`);
+
   const driveId = json?.parentReference?.driveId || "";
   const itemId = json?.id || "";
 
@@ -223,7 +245,7 @@ async function graphGetDriveItemFromShareLink(accessToken, shareUrl) {
     throw new Error("Could not resolve share link to driveId/itemId.");
   }
 
-  return { driveId, itemId };
+  return { driveId, itemId, driveItem: json };
 }
 
 // Read a range
@@ -241,6 +263,84 @@ async function graphGetRangeValues(
     `/drives/${driveId}/items/${itemId}/workbook/worksheets('${encSheet}')/range(address='${encAddr}')`
   );
   return json?.values || null;
+}
+
+// Get driveItem metadata (created/modified/name/webUrl)
+async function graphGetDriveItem(accessToken, driveId, itemId) {
+  return graphFetch(accessToken, `/drives/${driveId}/items/${itemId}`);
+}
+
+// ---------------------------
+// File meta shaping for card (FLAT response)
+// ---------------------------
+
+async function buildFlatCardMeta(dealId, hubspotToken) {
+  const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
+
+  // If there is no fee sheet URL, return the flat defaults (card will show Create)
+  if (!meta.feeSheetUrl) {
+    return {
+      feeSheetUrl: "",
+      feeSheetFileName: "",
+      feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
+      lastUpdatedAt: "",
+      spCreatedAt: "",
+      spLastModifiedAt: "",
+      feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
+      readyForProposal: meta.readyForProposal || false,
+      fee_sheet_ready_at: meta.readyAt || "",
+      fee_sheet_ready_by: meta.readyBy || "",
+    };
+  }
+
+  const accessToken = await getMsAccessToken();
+
+  let driveId = meta.feeSheetDriveId || "";
+  let itemId = meta.feeSheetItemId || "";
+
+  // Resolve and persist IDs if missing
+  if (!driveId || !itemId) {
+    const resolved = await graphGetDriveItemFromShareLink(
+      accessToken,
+      meta.feeSheetUrl
+    );
+    driveId = resolved.driveId;
+    itemId = resolved.itemId;
+
+    await hubspotPatchDeal(dealId, hubspotToken, {
+      fee_sheet_drive_id: driveId,
+      fee_sheet_item_id: itemId,
+    });
+  }
+
+  // Pull SharePoint timestamps + file name
+  let spCreatedAt = "";
+  let spLastModifiedAt = "";
+  let feeSheetFileName = meta.feeSheetFileName || "";
+
+  try {
+    const item = await graphGetDriveItem(accessToken, driveId, itemId);
+    spCreatedAt = item?.createdDateTime || "";
+    spLastModifiedAt = item?.lastModifiedDateTime || "";
+    feeSheetFileName = feeSheetFileName || item?.name || "";
+  } catch {
+    // If Graph metadata fails, still return what we have from HubSpot properties
+  }
+
+  const lastUpdatedAt = spLastModifiedAt || meta.feeSheetCreatedAt || "";
+
+  return {
+    feeSheetUrl: meta.feeSheetUrl,
+    feeSheetFileName,
+    feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
+    lastUpdatedAt,
+    spCreatedAt,
+    spLastModifiedAt,
+    feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
+    readyForProposal: meta.readyForProposal || false,
+    fee_sheet_ready_at: meta.readyAt || "",
+    fee_sheet_ready_by: meta.readyBy || "",
+  };
 }
 
 // ---------------------------
@@ -287,6 +387,165 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
 
   const amount = toNumberOrZero(raw);
   return { raw, amount };
+}
+
+// ---------------------------
+// Create fee sheet (template copy) — OPTIONAL, env-driven
+// ---------------------------
+
+async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
+  // If a fee sheet already exists, return it (idempotent)
+  const existing = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
+  if (existing?.feeSheetUrl) {
+    const flat = await buildFlatCardMeta(dealId, hubspotToken);
+    return {
+      message: "Fee sheet already exists for this deal.",
+      ...flat,
+    };
+  }
+
+  if (!FEE_SHEET_TEMPLATE_SHARE_URL || !FEE_SHEET_DEST_FOLDER_SHARE_URL) {
+    const err = new Error(
+      "Create is not configured. Set FEE_SHEET_TEMPLATE_SHARE_URL and FEE_SHEET_DEST_FOLDER_SHARE_URL on Render."
+    );
+    err.status = 501;
+    throw err;
+  }
+
+  const accessToken = await getMsAccessToken();
+
+  // Resolve template item + destination folder item
+  const templateResolved = await graphGetDriveItemFromShareLink(
+    accessToken,
+    FEE_SHEET_TEMPLATE_SHARE_URL
+  );
+  const destResolved = await graphGetDriveItemFromShareLink(
+    accessToken,
+    FEE_SHEET_DEST_FOLDER_SHARE_URL
+  );
+
+  const templateDriveId = templateResolved.driveId;
+  const templateItemId = templateResolved.itemId;
+
+  const destDriveId = destResolved.driveId;
+  const destFolderItemId = destResolved.itemId;
+
+  const fileName = `Fee Sheet - Deal ${dealId}.xlsx`;
+
+  // Copy template into destination folder
+  // Graph returns 202 + Location header (monitor URL)
+  const copyRes = await fetch(
+    `https://graph.microsoft.com/v1.0/drives/${templateDriveId}/items/${templateItemId}/copy`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        parentReference: { driveId: destDriveId, id: destFolderItemId },
+        name: fileName,
+      }),
+    }
+  );
+
+  if (!copyRes.ok) {
+    const txt = await copyRes.text();
+    throw new Error(`Template copy failed: ${txt}`);
+  }
+
+  const monitorUrl = copyRes.headers.get("location") || "";
+
+  // Best-effort poll for completion (kept short to avoid long card waits)
+  let newItem = null;
+  if (monitorUrl) {
+    for (let i = 0; i < 8; i++) {
+      await sleep(800);
+      const m = await fetch(monitorUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      // Some tenants return 202 while in progress, 200 on completion
+      if (m.status === 200) {
+        try {
+          const j = await m.json();
+          // Often includes resourceId
+          const newItemId = j?.resourceId || j?.id || "";
+          if (newItemId) {
+            newItem = await graphGetDriveItem(
+              accessToken,
+              destDriveId,
+              newItemId
+            );
+          }
+        } catch {
+          // ignore
+        }
+        break;
+      }
+    }
+  }
+
+  // If we couldn’t poll it, try to find by name in the folder (light attempt)
+  if (!newItem) {
+    try {
+      const children = await graphFetch(
+        accessToken,
+        `/drives/${destDriveId}/items/${destFolderItemId}/children?$top=200`
+      );
+      const found =
+        children?.value?.find((x) => String(x?.name) === fileName) || null;
+      if (found?.id) {
+        newItem = await graphGetDriveItem(accessToken, destDriveId, found.id);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!newItem?.id) {
+    // Copy likely succeeded but we couldn't retrieve the item quickly
+    // Store minimal info; user can refresh/poll via card reload
+    await hubspotPatchDeal(dealId, hubspotToken, {
+      fee_sheet_file_name: fileName,
+      fee_sheet_created_by: createdBy || "Unknown user",
+      fee_sheet_created_at: toIsoNow(),
+    });
+
+    return {
+      message:
+        "Fee sheet creation started. Refresh the card in a few seconds to see the link.",
+      feeSheetUrl: "",
+      feeSheetFileName: fileName,
+      feeSheetCreatedBy: createdBy || "Unknown user",
+      lastUpdatedAt: "",
+      spCreatedAt: "",
+      spLastModifiedAt: "",
+      feeSheetLastSyncedAt: "",
+      readyForProposal: false,
+      fee_sheet_ready_at: "",
+      fee_sheet_ready_by: "",
+    };
+  }
+
+  const newItemId = newItem.id;
+  const webUrl = newItem.webUrl || "";
+
+  // Persist to HubSpot deal
+  await hubspotPatchDeal(dealId, hubspotToken, {
+    fee_sheet_url: webUrl,
+    fee_sheet_drive_id: destDriveId,
+    fee_sheet_item_id: newItemId,
+    fee_sheet_file_name: newItem?.name || fileName,
+    fee_sheet_created_by: createdBy || "Unknown user",
+    fee_sheet_created_at: toIsoNow(),
+  });
+
+  const flat = await buildFlatCardMeta(dealId, hubspotToken);
+  return {
+    message: "Fee sheet created ✅",
+    ...flat,
+  };
 }
 
 // ---------------------------
@@ -513,9 +772,10 @@ app.get("/", (_req, res) => {
 app.all("/api/fee-sheet", async (req, res) => {
   try {
     if (!HUBSPOT_TOKEN) {
-      return res
-        .status(500)
-        .json({ message: "Missing HUBSPOT_PRIVATE_APP_TOKEN env var." });
+      return res.status(500).json({
+        message:
+          "Missing HubSpot token env var. Set HUBSPOT_PRIVATE_APP_TOKEN (preferred) or HUBSPOT_TOKEN.",
+      });
     }
 
     const input = req.method === "GET" ? req.query : req.body;
@@ -530,11 +790,37 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.status(400).json({ message: "Missing dealId/objectId." });
     }
 
+    // ---- GET (flat shape expected by card) ----
     if (action === "get") {
-      const meta = await hubspotGetDealFeeSheetMeta(dealId, HUBSPOT_TOKEN);
-      return res.json({ message: "ok", meta });
+      const flat = await buildFlatCardMeta(dealId, HUBSPOT_TOKEN);
+      return res.json(flat);
     }
 
+    // ---- CREATE (card calls action=create) ----
+    if (action === "create") {
+      const out = await createFeeSheetFromTemplate({
+        dealId,
+        hubspotToken: HUBSPOT_TOKEN,
+        createdBy: createdBy || "Unknown user",
+      });
+      return res.json(out);
+    }
+
+    // ---- REFRESH (card calls action=refresh) ----
+    if (action === "refresh") {
+      const result = await upsertInputDbLineItems({
+        dealId,
+        hubspotToken: HUBSPOT_TOKEN,
+      });
+
+      const flat = await buildFlatCardMeta(dealId, HUBSPOT_TOKEN);
+      return res.json({
+        message: `Synced ✅ (+${result.summary.created} ~${result.summary.updated} -${result.summary.deleted}, skipped ${result.summary.skipped})`,
+        feeSheetLastSyncedAt: flat.feeSheetLastSyncedAt,
+      });
+    }
+
+    // ---- Sync line items (manual / legacy) ----
     if (action === "sync-line-items" || action === "syncLineItems") {
       const result = await upsertInputDbLineItems({
         dealId,
@@ -548,6 +834,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
+    // ---- Ready for proposal ----
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
@@ -558,7 +845,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       let summaryAmount = null;
 
-      // Only do the expensive stuff when setting ready=true
+      // Only do expensive stuff when setting ready=true
       if (next) {
         const result = await upsertInputDbLineItems({
           dealId,
@@ -601,8 +888,10 @@ app.all("/api/fee-sheet", async (req, res) => {
 
     return res.status(400).json({ message: `Unknown action: ${action}` });
   } catch (err) {
+    const status =
+      err?.status && Number.isFinite(err.status) ? err.status : 500;
     console.error("Server error:", err);
-    return res.status(500).json({
+    return res.status(status).json({
       message: "Server error",
       error: err?.message || String(err),
     });
