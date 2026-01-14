@@ -19,9 +19,12 @@
 // CommonJS imports (Render default)
 const express = require("express");
 const cors = require("cors");
-const dotenv = require("dotenv");
-
-dotenv.config();
+// Optional dotenv for local dev; Render provides env vars without it.
+try {
+  require("dotenv").config();
+} catch {
+  // ignore if dotenv isn't installed (e.g., on Render)
+}
 
 const app = express();
 app.use(cors());
