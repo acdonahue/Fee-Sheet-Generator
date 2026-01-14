@@ -1,25 +1,27 @@
 /**
- * server.js (FULL FILE REPLACEMENT)
+ * server.js (FULL FILE REPLACEMENT — ESM + ESLint-friendly)
  *
- * - action=get...action=set-ready (ready=true):
- *    reads Input-DB!B15:B160 + Input-DB!AC16:AC160 from the SharePoint-hosted Excel fee sheet
- *    and upserts HubSpot line items keyed by fee_sheet_key = INPUT_DB_ROW_<row>.
+ * Fixes:
+ * - Render ESM compatibility (still requires backend to run as ESM: "type":"module" or .mjs)
+ * - ESLint: no require(), no implicit globals (Buffer/process imported)
+ * - ESLint: no-unused-vars for catch blocks (remove catch param entirely)
  *
- * - action=set-ready (ready=true) ALSO:
- *    reads Summary!J7 from the same fee sheet and writes it to the deal's "amount" property.
- *
+ * Behavior:
+ * - action=get:
+ *    returns deal fee sheet meta
+ * - action=set-ready (ready=true):
+ *    1) sync line items from Input-DB
+ *    2) read Summary!J7 and write it to deal property "amount"
+ *    3) set ready properties on the deal
  * - action=set-ready (ready=false):
- *    only updates the ready properties on the deal (does not touch line items or amount).
- *
+ *    only sets ready properties (does not touch line items or amount)
  * - action=sync-line-items:
- *    runs the same line item sync without toggling ready.
- *
- * Notes:
- * - Requires env vars for HubSpot + Microsoft Graph auth (see below).
+ *    sync line items without toggling ready
  */
 
+import process from "process";
+import { Buffer } from "buffer";
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
 import dotenv from "dotenv";
 
@@ -78,10 +80,11 @@ async function hsFetch(path, { method = "GET", token, body } = {}) {
 
   const text = await res.text();
   let json = null;
+
   try {
     json = text ? JSON.parse(text) : null;
-  } catch (e) {
-    // non-json response
+  } catch {
+    // Non-JSON response; keep json as null
   }
 
   if (!res.ok) {
@@ -104,7 +107,6 @@ async function hubspotPatchDeal(dealId, token, properties) {
 }
 
 async function hubspotGetDealFeeSheetMeta(dealId, token) {
-  // Pull only the properties we care about
   const props = [
     "fee_sheet_url",
     "fee_sheet_drive_id",
@@ -187,9 +189,12 @@ async function graphFetch(accessToken, path, { method = "GET", body } = {}) {
 
   const text = await res.text();
   let json = null;
+
   try {
     json = text ? JSON.parse(text) : null;
-  } catch (e) {}
+  } catch {
+    // Non-JSON response; keep json as null
+  }
 
   if (!res.ok) {
     const msg = json?.error?.message || text || `Graph error ${res.status}`;
@@ -202,10 +207,8 @@ async function graphFetch(accessToken, path, { method = "GET", body } = {}) {
   return json;
 }
 
-// Graph: resolve a SharePoint/OneDrive “share link” to a driveItem
+// Resolve a SharePoint/OneDrive “share link” to a driveItem
 async function graphGetDriveItemFromShareLink(accessToken, shareUrl) {
-  // Encode URL into Graph sharing token format
-  // https://learn.microsoft.com/en-us/graph/api/shares-get?view=graph-rest-1.0
   const base64 = Buffer.from(shareUrl, "utf8")
     .toString("base64")
     .replace(/\+/g, "-")
@@ -224,7 +227,7 @@ async function graphGetDriveItemFromShareLink(accessToken, shareUrl) {
   return { driveId, itemId };
 }
 
-// Graph: read a range
+// Read a range
 async function graphGetRangeValues(
   accessToken,
   driveId,
@@ -242,11 +245,9 @@ async function graphGetRangeValues(
 }
 
 // ---------------------------
-// NEW: Summary!J7 => Deal amount
+// Summary!J7 => Deal amount
 // ---------------------------
 
-// When "Ready for proposal" is clicked, pull Summary!J7 from the fee sheet and (optionally)
-// write it to the HubSpot deal's "amount" property.
 async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
   if (!meta?.feeSheetUrl)
@@ -254,7 +255,6 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
 
   const accessToken = await getMsAccessToken();
 
-  // Prefer cached IDs stored on the deal, resolve from share link if missing.
   let driveId = meta.feeSheetDriveId || "";
   let itemId = meta.feeSheetItemId || "";
 
@@ -266,14 +266,12 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
     driveId = resolved.driveId;
     itemId = resolved.itemId;
 
-    // Persist for faster future reads
     await hubspotPatchDeal(dealId, hubspotToken, {
       fee_sheet_drive_id: driveId,
       fee_sheet_item_id: itemId,
     });
   }
 
-  // Read Summary!J7
   const values = await graphGetRangeValues(
     accessToken,
     driveId,
@@ -283,7 +281,6 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   );
   const raw = getCell(values, 0, 0);
 
-  // If blank/null, don't overwrite the deal amount
   if (raw === null || raw === undefined || String(raw).trim() === "") {
     return { raw, amount: null };
   }
@@ -299,7 +296,6 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
 const INPUT_DB_NAME_RANGE = "B15:B160";
 const INPUT_DB_PRICE_RANGE = "AC16:AC160";
 
-// block starts (row ranges) — NOTE: J7 request is separate, this is for line items only
 const INPUT_DB_BLOCKS = [
   { start: 16, end: 25 },
   { start: 31, end: 40 },
@@ -314,8 +310,6 @@ const INPUT_DB_BLOCKS = [
 ];
 
 async function hsSearchLineItemsByKey(token, feeSheetKey) {
-  // Search line items by custom property "fee_sheet_key"
-  // If your portal uses a different internal property name, update here.
   const body = {
     filterGroups: [
       {
@@ -365,7 +359,6 @@ async function hsDeleteLineItem(token, lineItemId) {
 }
 
 async function hsAssociateLineItemToDeal(token, dealId, lineItemId) {
-  // v4 association endpoint
   return hsFetch(
     `/crm/v4/objects/deals/${dealId}/associations/line_items/${lineItemId}/deal_to_line_item`,
     { method: "PUT", token }
@@ -373,9 +366,7 @@ async function hsAssociateLineItemToDeal(token, dealId, lineItemId) {
 }
 
 function getBlockFallbackName(namesValues, blockStartRow) {
-  // namesValues corresponds to B15..B160 (indexes 0..145)
-  // For row r, index = r - 15.
-  const headerRow = blockStartRow - 1; // e.g. block 16..25 => header is row 15
+  const headerRow = blockStartRow - 1;
   const idx = headerRow - 15;
   const val = getCell(namesValues, idx, 0);
   return val ? String(val).trim() : "";
@@ -394,7 +385,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
 
   const accessToken = await getMsAccessToken();
 
-  // Use cached driveId/itemId if present; otherwise resolve from share link
   let driveId = meta.feeSheetDriveId || "";
   let itemId = meta.feeSheetItemId || "";
 
@@ -406,14 +396,12 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     driveId = resolved.driveId;
     itemId = resolved.itemId;
 
-    // Persist back to deal for future speed
     await hubspotPatchDeal(dealId, hubspotToken, {
       fee_sheet_drive_id: driveId,
       fee_sheet_item_id: itemId,
     });
   }
 
-  // Read Input-DB ranges
   const namesValues = await graphGetRangeValues(
     accessToken,
     driveId,
@@ -430,16 +418,13 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     INPUT_DB_PRICE_RANGE
   );
 
-  // debug sample (kept intentionally small)
   const debugSample = {
     B15: getCell(namesValues, 0, 0),
     B16: getCell(namesValues, 1, 0),
     AC16: getCell(priceValues, 0, 0),
   };
 
-  // Build a quick map row => price
   const priceByRow = new Map();
-  // priceValues is AC16..AC160 (rows 16..160 => 145 rows)
   for (let i = 0; i < 145; i++) {
     const rowNumber = 16 + i;
     const raw = getCell(priceValues, i, 0);
@@ -461,12 +446,10 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
 
       const shouldExist = amount > 0;
 
-      // Find existing line item by key
       const existing = await hsSearchLineItemsByKey(hubspotToken, feeSheetKey);
       const existingItem = existing?.[0] || null;
 
       if (!shouldExist) {
-        // If no price, delete existing item if present; otherwise skip
         if (existingItem?.id) {
           await hsDeleteLineItem(hubspotToken, existingItem.id);
           summary.deleted += 1;
@@ -478,7 +461,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
         continue;
       }
 
-      // should exist => create or update
       const props = {
         name,
         price: String(amount),
@@ -515,7 +497,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     }
   }
 
-  // Persist "last synced" info
   await hubspotPatchDeal(dealId, hubspotToken, {
     fee_sheet_last_synced_at: toIsoNow(),
     fee_sheet_last_synced_by: "Fee Sheet Backend",
@@ -528,7 +509,7 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
 // Routes
 // ---------------------------
 
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.send("Fee Sheet backend is running.");
 });
 
@@ -553,16 +534,11 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.status(400).json({ message: "Missing dealId/objectId." });
     }
 
-    // --- action=get: return current deal fee sheet meta
     if (action === "get") {
       const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
-      return res.json({
-        message: "ok",
-        meta,
-      });
+      return res.json({ message: "ok", meta });
     }
 
-    // --- action=sync-line-items: run line item sync without toggling ready
     if (action === "sync-line-items" || action === "syncLineItems") {
       const result = await upsertInputDbLineItems({ dealId, hubspotToken });
       return res.json({
@@ -573,18 +549,14 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    // --- action=set-ready: toggle ready, optionally sync items + deal amount when setting ready=true
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
-
-      console.log("[set-ready] called", { dealId, next, by });
 
       let lineItemChanges = [];
       let lineItemSummary = { created: 0, updated: 0, deleted: 0, skipped: 0 };
       let debugSample = null;
 
-      // NEW: pull Summary!J7 and (when ready=true) write it to the deal's amount
       let summaryAmount = null;
 
       if (next) {
@@ -612,7 +584,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       return res.json({
         message: next
-          ? `Ready status updated ✅ (new line items: ${lineItemSummary.created})`
+          ? `Ready status updated ✅ (line items +${lineItemSummary.created} ~${lineItemSummary.updated} -${lineItemSummary.deleted})`
           : "Ready status updated ✅",
         readyForProposal: next,
         lineItemSummary,
@@ -631,5 +603,5 @@ app.all("/api/fee-sheet", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
