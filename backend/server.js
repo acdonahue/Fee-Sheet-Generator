@@ -3,23 +3,20 @@
 /**
  * backend/server.js (FULL FILE REPLACEMENT — CommonJS for Render)
  *
- * Includes:
- * ✅ Fix for card contract: action=get returns FLAT fields (feeSheetUrl, feeSheetFileName, etc.)
- * ✅ Adds action=create + action=refresh (as NewCard.tsx expects)
- * ✅ Ready-for-proposal: sync line items + set deal amount from Summary!J7
- * ✅ HubSpot 429 protection: throttling + retry w/ backoff (prevents "secondly limit")
+ * Updated behavior (per your request):
+ * ✅ action=set-ready ONLY toggles ready properties (fast; no line-item sync; no amount update)
+ * ✅ action=refresh does the heavy work:
+ *    - sync Input-DB line items
+ *    - read Summary!J7 and set deal property "amount"
+ *    - update last synced fields
  *
- * Required Render env vars:
- * - HUBSPOT_PRIVATE_APP_TOKEN (preferred)  [or HUBSPOT_TOKEN]
- * - MS_TENANT_ID
- * - MS_CLIENT_ID
- * - MS_CLIENT_SECRET
- *
- * Optional (to enable action=create):
- * - FEE_SHEET_TEMPLATE_SHARE_URL  (share link to template file)
- * - FEE_SHEET_DEST_FOLDER_SHARE_URL (share link to destination folder)
+ * Also includes:
+ * ✅ Card contract: action=get returns FLAT fields
+ * ✅ action=create (env-driven template copy)
+ * ✅ HubSpot 429 protection: throttling + retry w/ backoff
  */
 
+// CommonJS imports (Render default)
 const express = require("express");
 const cors = require("cors");
 
@@ -83,7 +80,7 @@ function sleep(ms) {
 // HubSpot fetch + rate limiting + 429 retry
 // ---------------------------
 
-// Serialize HubSpot calls so a big line-item loop doesn't burst above per-second limits.
+// Serialize HubSpot calls so a big loop doesn't burst above per-second limits.
 let hsQueue = Promise.resolve();
 let hsLastCallAt = 0;
 
@@ -121,7 +118,6 @@ async function hsFetch(path, { method = "GET", token, body } = {}) {
     const err = new Error(msg);
     err.status = res.status;
     err.payload = json;
-    // HubSpot often sets Retry-After header for 429
     const retryAfter = res.headers.get("retry-after");
     err.retryAfterSeconds = retryAfter ? Number(retryAfter) : 0;
     throw err;
@@ -145,12 +141,11 @@ async function hsFetchWithRetry(path, opts = {}, retries = 6) {
       const status = err?.status;
 
       if (status === 429 && retries > 0) {
-        // Prefer Retry-After if provided; otherwise exponential backoff + jitter
         const retryAfterMs = err.retryAfterSeconds
           ? Math.max(0, err.retryAfterSeconds) * 1000
           : 0;
 
-        const attemptIndex = 6 - retries; // 0,1,2...
+        const attemptIndex = 6 - retries;
         const backoffMs = Math.min(
           12000,
           700 * Math.pow(2, attemptIndex) + Math.floor(Math.random() * 250)
@@ -159,7 +154,6 @@ async function hsFetchWithRetry(path, opts = {}, retries = 6) {
         const waitMs = Math.max(retryAfterMs, backoffMs);
         await sleep(waitMs);
 
-        // Recurse (still serialized through queue because we await in this same task)
         return hsFetchWithRetry(path, opts, retries - 1);
       }
 
@@ -375,7 +369,7 @@ async function buildFlatCardMeta(dealId, hubspotToken) {
     spLastModifiedAt = item?.lastModifiedDateTime || "";
     feeSheetFileName = feeSheetFileName || item?.name || "";
   } catch {
-    // ignore graph metadata failures; still return HS properties
+    // ignore graph metadata failures
   }
 
   const lastUpdatedAt = spLastModifiedAt || meta.feeSheetCreatedAt || "";
@@ -444,7 +438,6 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
 // ---------------------------
 
 async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
-  // If fee sheet already exists, return it (idempotent)
   const existing = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
   if (existing?.feeSheetUrl) {
     const flat = await buildFlatCardMeta(dealId, hubspotToken);
@@ -478,7 +471,6 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
 
   const fileName = `Fee Sheet - Deal ${dealId}.xlsx`;
 
-  // Start copy
   const copyRes = await fetch(
     `https://graph.microsoft.com/v1.0/drives/${templateDriveId}/items/${templateItemId}/copy`,
     {
@@ -501,7 +493,6 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
 
   const monitorUrl = copyRes.headers.get("location") || "";
 
-  // Best-effort poll (short)
   let newItem = null;
   if (monitorUrl) {
     for (let i = 0; i < 8; i++) {
@@ -530,7 +521,6 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   }
 
   if (!newItem?.id) {
-    // Could be still copying; write basic metadata and let user refresh
     await hubspotPatchDeal(dealId, hubspotToken, {
       fee_sheet_file_name: fileName,
       fee_sheet_created_by: createdBy || "Unknown user",
@@ -700,7 +690,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
     AC16: getCell(priceValues, 0, 0),
   };
 
-  // Map rows 16..160 -> prices (145 rows)
   const priceByRow = new Map();
   for (let i = 0; i < 145; i++) {
     const rowNumber = 16 + i;
@@ -827,17 +816,37 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.json(out);
     }
 
-    // ---- REFRESH (card calls action=refresh) ----
+    // ---- REFRESH (sync line items + set deal amount from Summary!J7) ----
     if (action === "refresh") {
       const result = await upsertInputDbLineItems({
         dealId,
         hubspotToken: HUBSPOT_TOKEN,
       });
 
+      const j7 = await getSummaryJ7Amount({
+        dealId,
+        hubspotToken: HUBSPOT_TOKEN,
+      });
+
+      if (j7.amount !== null) {
+        await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, {
+          amount: String(j7.amount),
+        });
+      }
+
       const flat = await buildFlatCardMeta(dealId, HUBSPOT_TOKEN);
+
       return res.json({
-        message: `Synced ✅ (+${result.summary.created} ~${result.summary.updated} -${result.summary.deleted}, skipped ${result.summary.skipped})`,
+        message: `Synced ✅ (+${result.summary.created} ~${
+          result.summary.updated
+        } -${result.summary.deleted}, skipped ${result.summary.skipped})${
+          j7.amount !== null
+            ? ` • Deal amount set to ${j7.amount}`
+            : " • Deal amount not changed (Summary!J7 blank)"
+        }`,
         feeSheetLastSyncedAt: flat.feeSheetLastSyncedAt,
+        dealAmountUpdated: j7.amount !== null,
+        dealAmountValue: j7.amount,
       });
     }
 
@@ -855,32 +864,10 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    // ---- Ready for proposal ----
+    // ---- Ready for proposal (FAST ONLY) ----
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
-
-      let lineItemChanges = [];
-      let lineItemSummary = { created: 0, updated: 0, deleted: 0, skipped: 0 };
-      let debugSample = null;
-
-      let summaryAmount = null;
-
-      if (next) {
-        const result = await upsertInputDbLineItems({
-          dealId,
-          hubspotToken: HUBSPOT_TOKEN,
-        });
-        lineItemChanges = result.changes;
-        lineItemSummary = result.summary;
-        debugSample = result.debugSample;
-
-        const j7 = await getSummaryJ7Amount({
-          dealId,
-          hubspotToken: HUBSPOT_TOKEN,
-        });
-        summaryAmount = j7.amount; // null if blank
-      }
 
       const patchProps = {
         fee_sheet_ready_for_proposal: next ? "true" : "false",
@@ -888,20 +875,13 @@ app.all("/api/fee-sheet", async (req, res) => {
         fee_sheet_ready_at: toIsoNow(),
       };
 
-      if (next && summaryAmount !== null) {
-        patchProps.amount = String(summaryAmount);
-      }
-
       await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, patchProps);
 
       return res.json({
         message: next
-          ? `Ready status updated ✅ (line items +${lineItemSummary.created} ~${lineItemSummary.updated} -${lineItemSummary.deleted})`
+          ? "Ready status updated ✅ (sync and amount are handled by the Sync button)"
           : "Ready status updated ✅",
         readyForProposal: next,
-        lineItemSummary,
-        lineItemChanges,
-        debugSample,
       });
     }
 
