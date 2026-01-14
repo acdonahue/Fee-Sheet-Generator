@@ -234,7 +234,6 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
     "fee_sheet_drive_id",
     "fee_sheet_item_id",
     "fee_sheet_last_synced_at",
-    "fee_sheet_last_synced_by",
     "fee_sheet_ready_for_proposal",
     "fee_sheet_ready_by",
     "fee_sheet_ready_at",
@@ -253,7 +252,6 @@ async function hubspotGetDealFeeSheetMeta(dealId, token) {
     feeSheetCreatedBy: p.fee_sheet_created_by || "",
     feeSheetCreatedAt: p.fee_sheet_created_at || "",
     feeSheetLastSyncedAt: p.fee_sheet_last_synced_at || "",
-    feeSheetLastSyncedBy: p.fee_sheet_last_synced_by || "",
     readyForProposal:
       String(p.fee_sheet_ready_for_proposal || "").toLowerCase() === "true",
     readyBy: p.fee_sheet_ready_by || "",
@@ -854,7 +852,6 @@ async function upsertInputDbLineItems({ dealId, hubspotToken }) {
 
   await hubspotPatchDeal(dealId, hubspotToken, {
     fee_sheet_last_synced_at: toIsoNow(),
-    fee_sheet_last_synced_by: "Fee Sheet Backend",
   });
 
   return { changes, summary, debugSample };
