@@ -386,6 +386,49 @@ async function graphGetDriveItem(accessToken, driveId, itemId) {
 // Card meta (flat response expected by NewCard.tsx)
 // ---------------------------
 
+
+// ---------------------------
+// FAST card meta (NO Graph calls)
+// - Used for action=get so the card can render quickly even if the backend just woke up.
+// - Returns HubSpot-stored fields only; SharePoint timestamps remain blank until a user-triggered action runs.
+// ---------------------------
+async function buildFlatCardMetaFast(dealId, hubspotToken) {
+  const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
+
+  // Keep response shape identical to the full meta builder so the UI doesn't branch.
+  if (!meta.feeSheetUrl) {
+    return {
+      feeSheetUrl: "",
+      feeSheetFileName: "",
+      feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
+      lastUpdatedAt: "",
+      spCreatedAt: "",
+      spLastModifiedAt: "",
+      feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
+      readyForProposal: meta.readyForProposal || false,
+      fee_sheet_ready_at: meta.readyAt || "",
+      fee_sheet_ready_by: meta.readyBy || "",
+    };
+  }
+
+  // Best-effort “updated” timestamp without hitting Graph.
+  // (We prefer SP last-modified, but that requires Graph—so fall back to what we already stored.)
+  const lastUpdatedAt = meta.feeSheetCreatedAt || meta.feeSheetLastSyncedAt || "";
+
+  return {
+    feeSheetUrl: meta.feeSheetUrl,
+    feeSheetFileName: meta.feeSheetFileName || "",
+    feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
+    lastUpdatedAt,
+    spCreatedAt: "",
+    spLastModifiedAt: "",
+    feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
+    readyForProposal: meta.readyForProposal || false,
+    fee_sheet_ready_at: meta.readyAt || "",
+    fee_sheet_ready_by: meta.readyBy || "",
+  };
+}
+
 async function buildFlatCardMeta(dealId, hubspotToken) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
 
@@ -624,6 +667,20 @@ async function hsDeleteLineItem(token, lineItemId) {
     method: "DELETE",
     token,
   });
+
+
+async function hsBatchArchiveLineItems(token, ids) {
+  if (!ids.length) return;
+  const chunks = chunkArray(ids, 100);
+  for (const c of chunks) {
+    const body = { inputs: c.map((id) => ({ id: String(id) })) };
+    await hsFetchWithRetry(`/crm/v3/objects/line_items/batch/archive`, {
+      method: "POST",
+      token,
+      body,
+    });
+  }
+}
 }
 
 // Create-and-associate in ONE call (no separate association endpoint).
@@ -689,44 +746,22 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
   }
 
   // 1) Pull existing associated line items (and find the managed ones by key prefix)
+  // 1) Find all line items currently associated to this deal
   const associatedIds = await hsGetDealAssociatedLineItemIds(
     hubspotToken,
     dealId
   );
-  const associatedItems = await hsBatchReadLineItems(
-    hubspotToken,
-    associatedIds
-  );
 
-  const managedToDelete = [];
-  let sawAnyKeyProperty = false;
-
-  for (const li of associatedItems) {
-    const keyVal = li?.properties?.[LINE_ITEM_KEY_PROP];
-    if (keyVal !== undefined) sawAnyKeyProperty = true;
-    if (typeof keyVal === "string" && keyVal.startsWith(MANAGED_KEY_PREFIX)) {
-      managedToDelete.push(li.id);
-    }
-  }
-
-  // If we had associated line items but none even exposed the key property,
-  // it usually means LINE_ITEM_KEY_PROP is wrong. We fail fast to prevent duplicates.
-  if (associatedIds.length > 0 && !sawAnyKeyProperty) {
-    const err = new Error(
-      `Line item key property "${LINE_ITEM_KEY_PROP}" not found on associated line items. Set env LINE_ITEM_KEY_PROP to the correct internal name to prevent duplicates.`
-    );
-    err.status = 500;
-    throw err;
-  }
-
-  // 2) Delete ALL managed fee-sheet line items (authoritative wipe)
+// Overwrite behavior: remove *all* existing line items on the deal, then recreate from the sheet.
+  // WARNING: this will delete manual line items too.
+  const toDelete = associatedIds.slice();
   let deleted = 0;
-  for (const id of managedToDelete) {
-    await hsDeleteLineItem(hubspotToken, id);
-    deleted += 1;
+  if (toDelete.length) {
+    await hsBatchArchiveLineItems(hubspotToken, toDelete);
+    deleted = toDelete.length;
   }
 
-  // 3) Read Excel ranges
+// 3) Read Excel ranges
   const namesValues = await graphGetRangeValues(
     accessToken,
     driveId,
@@ -810,6 +845,8 @@ app.get("/", (_req, res) => {
   res.send("Fee Sheet backend is running.");
 });
 
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+
 app.all("/api/fee-sheet", async (req, res) => {
   try {
     if (!HUBSPOT_TOKEN) {
@@ -832,7 +869,7 @@ app.all("/api/fee-sheet", async (req, res) => {
     }
 
     if (action === "get") {
-      const flat = await buildFlatCardMeta(dealId, HUBSPOT_TOKEN);
+      const flat = await buildFlatCardMetaFast(dealId, HUBSPOT_TOKEN);
       return res.json(flat);
     }
 

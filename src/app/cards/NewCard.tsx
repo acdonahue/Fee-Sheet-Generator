@@ -54,7 +54,7 @@ async function callBackend(params: Record<string, string>) {
 
   const res = await hubspot.fetch(url, {
     method: "GET",
-    timeout: 20_000,
+    timeout: 12_000,
   });
 
   if (!res.ok) {
