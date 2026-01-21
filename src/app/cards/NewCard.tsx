@@ -35,7 +35,10 @@ function getErrorMessage(err: unknown): string {
   }
 }
 
-hubspot.extend(({ context }) => <FeeSheetCard context={context} />);
+// ✅ Avoid TS "implicit any" on context
+hubspot.extend(({ context }: { context: unknown }) => (
+  <FeeSheetCard context={context} />
+));
 
 const BACKEND_ENDPOINT = "https://fee-sheet-backend.onrender.com/api/fee-sheet";
 const EXCEL_ICON_URL =
@@ -240,10 +243,10 @@ function FeeSheetCard({ context }: { context: unknown }) {
         setIsLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto-poll to tighten up “HubSpot noticing changes”
-  // (only while the card is open)
   useEffect(() => {
     if (!canOpen) return;
     if (isLoading) return;
@@ -251,10 +254,9 @@ function FeeSheetCard({ context }: { context: unknown }) {
     const POLL_MS = 20_000;
 
     const id = setInterval(() => {
-      // Don’t stomp on active operations
       if (isTogglingReady || isSyncingNow) return;
       loadFeeSheetMeta().catch(() => {
-        // silent: keep UI stable
+        // silent
       });
     }, POLL_MS);
 
@@ -281,7 +283,6 @@ function FeeSheetCard({ context }: { context: unknown }) {
     }
   }
 
-  // Sync now (pull Excel → deal properties) + refresh meta
   async function onSyncNow() {
     if (isSyncingNow || isTogglingReady || isLoading) return;
 
@@ -294,8 +295,7 @@ function FeeSheetCard({ context }: { context: unknown }) {
         objectId: String(objectId),
       });
 
-      if (body?.feeSheetLastSyncedAt)
-        setLastSyncedAt(body.feeSheetLastSyncedAt);
+      if (body?.feeSheetLastSyncedAt) setLastSyncedAt(body.feeSheetLastSyncedAt);
 
       setStatus(body?.message || "Synced.");
       await loadFeeSheetMeta();
@@ -306,7 +306,6 @@ function FeeSheetCard({ context }: { context: unknown }) {
     }
   }
 
-  // Ready for proposal
   async function onSendProposal() {
     if (isTogglingReady || proposalSentLocked) return;
 
@@ -321,22 +320,8 @@ function FeeSheetCard({ context }: { context: unknown }) {
         updatedBy: createdByForRequest,
       });
 
-      // Show the backend message + counts (if provided)
-      if (body?.lineItemSummary) {
-        const s = body.lineItemSummary;
-        setStatus(
-          `${body?.message || "Ready set."} Line items: +${s.created}, ~${
-            s.updated
-          }, -${s.deleted}`
-        );
-      } else {
-        setStatus(body?.message || "Ready set.");
-      }
-
-      // Lock immediately so UI swaps right away
+      setStatus(body?.message || "Ready set.");
       setProposalSentLocked(true);
-
-      // Immediately pull latest meta (and show it)
       await loadFeeSheetMeta();
     } catch (e: unknown) {
       setStatus(`Error: ${getErrorMessage(e)}`);
@@ -345,7 +330,6 @@ function FeeSheetCard({ context }: { context: unknown }) {
     }
   }
 
-  // Go back to editing
   async function onGoBackToEditing() {
     if (isTogglingReady) return;
 
@@ -436,13 +420,11 @@ function FeeSheetCard({ context }: { context: unknown }) {
                 </LoadingButton>
               ) : (
                 <>
-                  {/* Disabled Ready button with SUCCESS icon */}
                   <Button variant="primary" disabled={true}>
                     <Icon name="success" />
                     Ready for proposal
                   </Button>
 
-                  {/* Sync now button (does refresh + reload) */}
                   <LoadingButton
                     variant="secondary"
                     onClick={onSyncNow}
@@ -454,13 +436,14 @@ function FeeSheetCard({ context }: { context: unknown }) {
                     Sync now
                   </LoadingButton>
 
+                  {/* ✅ Icon-only "Reopen for edits" */}
                   <Button
                     variant="transparent"
                     size="xs"
                     onClick={onGoBackToEditing}
                     disabled={isTogglingReady || isSyncingNow}
                   >
-                    Reopen for edits
+                    <Icon name="edit" />
                   </Button>
                 </>
               )}
