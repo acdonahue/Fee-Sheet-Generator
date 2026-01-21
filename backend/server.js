@@ -800,16 +800,16 @@ app.all("/api/fee-sheet", async (req, res) => {
         storedAmount = await hubspotReadDealAmount(dealId, HUBSPOT_TOKEN);
 
         if (storedAmount === attemptedAmount) {
-          amountNote = ` • Deal amount set to ${attemptedAmount}`;
+          amountNote = `Deal amount set to ${attemptedAmount}`;
         } else {
-          amountNote = ` • Attempted to set deal amount to ${attemptedAmount}, but HubSpot shows ${
+          amountNote = `Attempted to set deal amount to ${attemptedAmount}, but HubSpot shows ${
             storedAmount || "(blank)"
           } (may be recalculated by line items/workflows)`;
         }
       }
 
       return res.json({
-        message: `Synced ✅ (deleted ${syncResult.summary.deleted}, created ${syncResult.summary.created}, skipped ${syncResult.summary.skipped})${amountNote}`,
+        message: `Synced ✅ (${amountNote} • Refresh to see line items.`,
         lineItemSummary: syncResult.summary,
         debugSample: syncResult.debugSample,
         createdKeysSample: syncResult.createdKeysSample,
