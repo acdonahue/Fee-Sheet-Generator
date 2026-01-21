@@ -7,7 +7,7 @@
  * ✅ action=get: returns FLAT fields expected by NewCard.tsx
  * ✅ action=create: (optional) copy template -> dest folder, save link/meta to deal
  * ✅ action=refresh (SYNC): authoritative sync from Excel
- *    - Deletes ALL fee-sheet-managed line items on the deal (fee_sheet_key starts with INPUT_DB_ROW_)
+ *    - Deletes ALL line items currently associated to the deal (overwrite mode)
  *    - Recreates line items exactly reflecting current sheet values (amount > 0)
  *    - Sets deal amount from Summary!J7
  *    - Reads back deal amount to verify what HubSpot actually stored
@@ -63,7 +63,7 @@ const FEE_SHEET_DEST_FOLDER_SHARE_URL =
 // Internal name of the line item key property in HubSpot
 const LINE_ITEM_KEY_PROP = process.env.LINE_ITEM_KEY_PROP || "fee_sheet_key";
 
-// Managed prefix — ONLY line items with this key prefix are owned by Sync
+// Managed prefix — line items created by Sync will use this key
 const MANAGED_KEY_PREFIX = "INPUT_DB_ROW_";
 
 // HubSpot API base
@@ -326,9 +326,7 @@ async function graphFetch(accessToken, path, { method = "GET", body } = {}) {
 
   try {
     json = text ? JSON.parse(text) : null;
-  } catch {
-    // keep json null
-  }
+  } catch {}
 
   if (!res.ok) {
     const msg = json?.error?.message || text || `Graph error ${res.status}`;
@@ -362,13 +360,7 @@ async function graphGetDriveItemFromShareLink(accessToken, shareUrl) {
   return { driveId, itemId };
 }
 
-async function graphGetRangeValues(
-  accessToken,
-  driveId,
-  itemId,
-  worksheetName,
-  address
-) {
+async function graphGetRangeValues(accessToken, driveId, itemId, worksheetName, address) {
   const encSheet = encodeURIComponent(worksheetName);
   const encAddr = encodeURIComponent(address);
   const json = await graphFetch(
@@ -383,19 +375,11 @@ async function graphGetDriveItem(accessToken, driveId, itemId) {
 }
 
 // ---------------------------
-// Card meta (flat response expected by NewCard.tsx)
-// ---------------------------
-
-
-// ---------------------------
 // FAST card meta (NO Graph calls)
-// - Used for action=get so the card can render quickly even if the backend just woke up.
-// - Returns HubSpot-stored fields only; SharePoint timestamps remain blank until a user-triggered action runs.
 // ---------------------------
 async function buildFlatCardMetaFast(dealId, hubspotToken) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
 
-  // Keep response shape identical to the full meta builder so the UI doesn't branch.
   if (!meta.feeSheetUrl) {
     return {
       feeSheetUrl: "",
@@ -411,8 +395,6 @@ async function buildFlatCardMetaFast(dealId, hubspotToken) {
     };
   }
 
-  // Best-effort “updated” timestamp without hitting Graph.
-  // (We prefer SP last-modified, but that requires Graph—so fall back to what we already stored.)
   const lastUpdatedAt = meta.feeSheetCreatedAt || meta.feeSheetLastSyncedAt || "";
 
   return {
@@ -453,10 +435,7 @@ async function buildFlatCardMeta(dealId, hubspotToken) {
   let itemId = meta.feeSheetItemId || "";
 
   if (!driveId || !itemId) {
-    const resolved = await graphGetDriveItemFromShareLink(
-      accessToken,
-      meta.feeSheetUrl
-    );
+    const resolved = await graphGetDriveItemFromShareLink(accessToken, meta.feeSheetUrl);
     driveId = resolved.driveId;
     itemId = resolved.itemId;
 
@@ -475,9 +454,7 @@ async function buildFlatCardMeta(dealId, hubspotToken) {
     spCreatedAt = item?.createdDateTime || "";
     spLastModifiedAt = item?.lastModifiedDateTime || "";
     feeSheetFileName = feeSheetFileName || item?.name || "";
-  } catch {
-    // ignore
-  }
+  } catch {}
 
   const lastUpdatedAt = spLastModifiedAt || meta.feeSheetCreatedAt || "";
 
@@ -495,14 +472,10 @@ async function buildFlatCardMeta(dealId, hubspotToken) {
   };
 }
 
-// ---------------------------
 // Summary!J7 => Deal amount
-// ---------------------------
-
 async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
-  if (!meta?.feeSheetUrl)
-    throw new Error("No fee sheet URL found on this deal.");
+  if (!meta?.feeSheetUrl) throw new Error("No fee sheet URL found on this deal.");
 
   const accessToken = await getMsAccessToken();
 
@@ -510,10 +483,7 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   let itemId = meta.feeSheetItemId || "";
 
   if (!driveId || !itemId) {
-    const resolved = await graphGetDriveItemFromShareLink(
-      accessToken,
-      meta.feeSheetUrl
-    );
+    const resolved = await graphGetDriveItemFromShareLink(accessToken, meta.feeSheetUrl);
     driveId = resolved.driveId;
     itemId = resolved.itemId;
 
@@ -523,13 +493,7 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
     });
   }
 
-  const values = await graphGetRangeValues(
-    accessToken,
-    driveId,
-    itemId,
-    "Summary",
-    "J7"
-  );
+  const values = await graphGetRangeValues(accessToken, driveId, itemId, "Summary", "J7");
   const raw = getCell(values, 0, 0);
 
   if (raw === null || raw === undefined || String(raw).trim() === "") {
@@ -539,10 +503,7 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   return { raw, amount: toNumberOrZero(raw) };
 }
 
-// ---------------------------
-// Create fee sheet (template copy) — OPTIONAL, env-driven
-// ---------------------------
-
+// Create fee sheet (template copy) — OPTIONAL
 async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   const existing = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
   if (existing?.feeSheetUrl) {
@@ -560,14 +521,8 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
 
   const accessToken = await getMsAccessToken();
 
-  const templateResolved = await graphGetDriveItemFromShareLink(
-    accessToken,
-    FEE_SHEET_TEMPLATE_SHARE_URL
-  );
-  const destResolved = await graphGetDriveItemFromShareLink(
-    accessToken,
-    FEE_SHEET_DEST_FOLDER_SHARE_URL
-  );
+  const templateResolved = await graphGetDriveItemFromShareLink(accessToken, FEE_SHEET_TEMPLATE_SHARE_URL);
+  const destResolved = await graphGetDriveItemFromShareLink(accessToken, FEE_SHEET_DEST_FOLDER_SHARE_URL);
 
   const templateDriveId = templateResolved.driveId;
   const templateItemId = templateResolved.itemId;
@@ -607,10 +562,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   return { message: "Fee sheet creation started ✅", ...flat };
 }
 
-// ---------------------------
-// SYNC: authoritative managed line items from Input-DB
-// ---------------------------
-
+// SYNC: authoritative line items from Input-DB
 const INPUT_DB_NAME_RANGE = "B15:B160";
 const INPUT_DB_PRICE_RANGE = "AC16:AC160";
 
@@ -627,47 +579,28 @@ const INPUT_DB_BLOCKS = [
   { start: 150, end: 160 },
 ];
 
+// Paged association fetch
 async function hsGetDealAssociatedLineItemIds(token, dealId) {
-  const deal = await hsFetchWithRetry(
-    `/crm/v3/objects/deals/${dealId}?associations=line_items`,
-    { token }
-  );
-  const results = deal?.associations?.line_items?.results || [];
-  return results.map((r) => r.id).filter(Boolean);
-}
+  const ids = [];
+  let after;
 
-async function hsBatchReadLineItems(token, ids) {
-  if (!ids.length) return [];
-  const chunks = chunkArray(ids, 100);
-  const all = [];
+  while (true) {
+    const path =
+      `/crm/v3/objects/deals/${dealId}/associations/line_items?limit=500` +
+      (after ? `&after=${encodeURIComponent(after)}` : "");
 
-  for (const c of chunks) {
-    const body = {
-      inputs: c.map((id) => ({ id })),
-      properties: [LINE_ITEM_KEY_PROP, "price", "name"],
-    };
+    const json = await hsFetchWithRetry(path, { token });
 
-    const json = await hsFetchWithRetry(
-      `/crm/v3/objects/line_items/batch/read`,
-      {
-        method: "POST",
-        token,
-        body,
-      }
-    );
+    const results = json?.results || [];
+    for (const r of results) if (r?.id) ids.push(String(r.id));
 
-    all.push(...(json?.results || []));
+    const next = json?.paging?.next?.after;
+    if (!next) break;
+    after = next;
   }
 
-  return all;
+  return ids;
 }
-
-async function hsDeleteLineItem(token, lineItemId) {
-  return hsFetchWithRetry(`/crm/v3/objects/line_items/${lineItemId}`, {
-    method: "DELETE",
-    token,
-  });
-
 
 async function hsBatchArchiveLineItems(token, ids) {
   if (!ids.length) return;
@@ -681,9 +614,8 @@ async function hsBatchArchiveLineItems(token, ids) {
     });
   }
 }
-}
 
-// Create-and-associate in ONE call (no separate association endpoint).
+// Create-and-associate in ONE call
 async function hsCreateLineItemAndAssociateToDeal(token, dealId, props) {
   const body = {
     properties: props,
@@ -722,20 +654,15 @@ function getRowName(namesValues, row) {
 
 async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
-  if (!meta?.feeSheetUrl)
-    throw new Error("No fee sheet URL found on this deal.");
+  if (!meta?.feeSheetUrl) throw new Error("No fee sheet URL found on this deal.");
 
-  // Resolve file for Graph
   const accessToken = await getMsAccessToken();
 
   let driveId = meta.feeSheetDriveId || "";
   let itemId = meta.feeSheetItemId || "";
 
   if (!driveId || !itemId) {
-    const resolved = await graphGetDriveItemFromShareLink(
-      accessToken,
-      meta.feeSheetUrl
-    );
+    const resolved = await graphGetDriveItemFromShareLink(accessToken, meta.feeSheetUrl);
     driveId = resolved.driveId;
     itemId = resolved.itemId;
 
@@ -745,38 +672,18 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
     });
   }
 
-  // 1) Pull existing associated line items (and find the managed ones by key prefix)
-  // 1) Find all line items currently associated to this deal
-  const associatedIds = await hsGetDealAssociatedLineItemIds(
-    hubspotToken,
-    dealId
-  );
+  const associatedIds = await hsGetDealAssociatedLineItemIds(hubspotToken, dealId);
+  console.log(`[sync] deal ${dealId}: associated line items = ${associatedIds.length}`);
 
-// Overwrite behavior: remove *all* existing line items on the deal, then recreate from the sheet.
-  // WARNING: this will delete manual line items too.
-  const toDelete = associatedIds.slice();
   let deleted = 0;
-  if (toDelete.length) {
-    await hsBatchArchiveLineItems(hubspotToken, toDelete);
-    deleted = toDelete.length;
+  if (associatedIds.length) {
+    await hsBatchArchiveLineItems(hubspotToken, associatedIds);
+    deleted = associatedIds.length;
   }
+  console.log(`[sync] deal ${dealId}: archived = ${deleted}`);
 
-// 3) Read Excel ranges
-  const namesValues = await graphGetRangeValues(
-    accessToken,
-    driveId,
-    itemId,
-    "Input-DB",
-    INPUT_DB_NAME_RANGE
-  );
-
-  const priceValues = await graphGetRangeValues(
-    accessToken,
-    driveId,
-    itemId,
-    "Input-DB",
-    INPUT_DB_PRICE_RANGE
-  );
+  const namesValues = await graphGetRangeValues(accessToken, driveId, itemId, "Input-DB", INPUT_DB_NAME_RANGE);
+  const priceValues = await graphGetRangeValues(accessToken, driveId, itemId, "Input-DB", INPUT_DB_PRICE_RANGE);
 
   const debugSample = {
     keyProp: LINE_ITEM_KEY_PROP,
@@ -785,7 +692,6 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
     AC16: getCell(priceValues, 0, 0),
   };
 
-  // Map rows 16..160 -> prices (145 rows)
   const priceByRow = new Map();
   for (let i = 0; i < 145; i++) {
     const rowNumber = 16 + i;
@@ -793,10 +699,10 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
     priceByRow.set(rowNumber, toNumberOrZero(raw));
   }
 
-  // 4) Recreate managed line items exactly from sheet
   let created = 0;
   let skipped = 0;
   const createdKeys = [];
+  const seenKeys = new Set();
 
   for (const blk of INPUT_DB_BLOCKS) {
     const fallback = getBlockFallbackName(namesValues, blk.start);
@@ -812,12 +718,10 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
       const name = rowName || fallback || `Row ${r}`;
 
       const key = `${MANAGED_KEY_PREFIX}${r}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
 
-      const props = {
-        name,
-        price: String(amount),
-        [LINE_ITEM_KEY_PROP]: key,
-      };
+      const props = { name, price: String(amount), [LINE_ITEM_KEY_PROP]: key };
 
       await hsCreateLineItemAndAssociateToDeal(hubspotToken, dealId, props);
       created += 1;
@@ -825,7 +729,8 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
     }
   }
 
-  // 5) Mark last synced timestamp (NO *_by fields)
+  console.log(`[sync] deal ${dealId}: created = ${created}, skipped = ${skipped}`);
+
   await hubspotPatchDeal(dealId, hubspotToken, {
     fee_sheet_last_synced_at: toIsoNow(),
   });
@@ -837,14 +742,8 @@ async function syncLineItemsFromSheetAuthoritative({ dealId, hubspotToken }) {
   };
 }
 
-// ---------------------------
 // Routes
-// ---------------------------
-
-app.get("/", (_req, res) => {
-  res.send("Fee Sheet backend is running.");
-});
-
+app.get("/", (_req, res) => res.send("Fee Sheet backend is running."));
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 
 app.all("/api/fee-sheet", async (req, res) => {
@@ -864,9 +763,7 @@ app.all("/api/fee-sheet", async (req, res) => {
     const updatedBy = input.updatedBy;
     const createdBy = input.createdBy;
 
-    if (!dealId) {
-      return res.status(400).json({ message: "Missing dealId/objectId." });
-    }
+    if (!dealId) return res.status(400).json({ message: "Missing dealId/objectId." });
 
     if (action === "get") {
       const flat = await buildFlatCardMetaFast(dealId, HUBSPOT_TOKEN);
@@ -882,15 +779,12 @@ app.all("/api/fee-sheet", async (req, res) => {
       return res.json(out);
     }
 
-    // SYNC button
     if (action === "refresh") {
-      // 1) authoritative line item sync
       const syncResult = await syncLineItemsFromSheetAuthoritative({
         dealId,
         hubspotToken: HUBSPOT_TOKEN,
       });
 
-      // 2) get Summary!J7 and attempt to write to amount
       const j7 = await getSummaryJ7Amount({
         dealId,
         hubspotToken: HUBSPOT_TOKEN,
@@ -902,11 +796,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       if (j7.amount !== null) {
         attemptedAmount = String(j7.amount);
-        await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, {
-          amount: attemptedAmount,
-        });
-
-        // Read back what HubSpot actually stored (handles auto-recalc / workflows)
+        await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, { amount: attemptedAmount });
         storedAmount = await hubspotReadDealAmount(dealId, HUBSPOT_TOKEN);
 
         if (storedAmount === attemptedAmount) {
@@ -928,7 +818,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    // Ready button (fast only)
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
       const by = updatedBy || createdBy || "Unknown user";
@@ -953,8 +842,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
     return res.status(400).json({ message: `Unknown action: ${action}` });
   } catch (err) {
-    const status =
-      err?.status && Number.isFinite(err.status) ? err.status : 500;
+    const status = err?.status && Number.isFinite(err.status) ? err.status : 500;
     console.error("Server error:", err);
     return res.status(status).json({
       message: "Server error",
