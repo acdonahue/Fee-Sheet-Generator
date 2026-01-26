@@ -8,9 +8,10 @@ import {
   Image,
   Icon,
   Link,
-  Box,
   Divider,
   ButtonRow,
+  Tooltip,
+  Tile,
 } from "@hubspot/ui-extensions";
 
 type HubSpotContext = {
@@ -25,6 +26,19 @@ type HubspotWithActions = {
   };
 };
 
+type AddAlertFn = (args: {
+  message: string;
+  type?: "info" | "success" | "warning" | "danger";
+  title?: string;
+}) => void;
+
+type ApiWithAddAlert = {
+  context: unknown;
+  actions?: {
+    addAlert?: AddAlertFn;
+  };
+};
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
@@ -35,14 +49,19 @@ function getErrorMessage(err: unknown): string {
   }
 }
 
-// ✅ Avoid TS "implicit any" on context
-hubspot.extend(({ context }: { context: unknown }) => (
-  <FeeSheetCard context={context} />
-));
+/**
+ * ✅ FIX: Do NOT type destructured args.
+ * HubSpot api/actions types are unions across extension points.
+ * Accept `api`, then safely narrow to `addAlert`.
+ */
+hubspot.extend((api) => {
+  const { context, actions } = api as unknown as ApiWithAddAlert;
+  return <FeeSheetCard context={context} addAlert={actions?.addAlert} />;
+});
 
 const BACKEND_ENDPOINT = "https://fee-sheet-backend.onrender.com/api/fee-sheet";
 const EXCEL_ICON_URL =
-  "https://50802810.fs1.hubspotusercontent-na1.net/hubfs/50802810/File%20type%20icon.svg";
+  "https://50802810.fs1.hubspotusercontent-na1.net/hubfs/50802810/file.png";
 
 function buildBackendUrl(params: Record<string, string>) {
   const url = new URL(BACKEND_ENDPOINT);
@@ -100,16 +119,25 @@ function StatusTag({
   const dotSrc = useMemo(() => buildDotSvgDataUri(s.dotColor), [s.dotColor]);
 
   return (
-    <Flex direction="row" align="center" gap="xs">
+    <Flex direction="row" align="baseline" gap="xs">
       <Image src={dotSrc} alt="" width={10} />
-      <Text variant="microcopy">{label}</Text>
+      <Text variant="microcopy" format={{ fontWeight: "bold" }}>
+        {label}
+      </Text>
     </Flex>
   );
 }
 
+
 /* ---------- Card ---------- */
 
-function FeeSheetCard({ context }: { context: unknown }) {
+function FeeSheetCard({
+  context,
+  addAlert,
+}: {
+  context: unknown;
+  addAlert?: AddAlertFn;
+}) {
   const ctx = context as HubSpotContext;
 
   const [status, setStatus] = useState("");
@@ -130,7 +158,6 @@ function FeeSheetCard({ context }: { context: unknown }) {
   const [isTogglingReady, setIsTogglingReady] = useState(false);
   const [isSyncingNow, setIsSyncingNow] = useState(false);
 
-  // UI mode: when true, Ready stays disabled + Sync Now appears next to it
   const [proposalSentLocked, setProposalSentLocked] = useState(false);
 
   const objectId = ctx.crm?.objectId || ctx.crm?.recordId || ctx.objectId || "";
@@ -165,6 +192,14 @@ function FeeSheetCard({ context }: { context: unknown }) {
     }
   };
 
+  const alert = (
+    type: "success" | "danger" | "info" | "warning",
+    message: string,
+    title?: string
+  ) => {
+    if (addAlert) addAlert({ type, message, title });
+  };
+
   const relativeTime = (iso: string) => {
     if (!iso) return "—";
     const d = new Date(iso);
@@ -184,6 +219,7 @@ function FeeSheetCard({ context }: { context: unknown }) {
 
     if (proposalSentLocked) {
       return { tone: "success" as const, label: "Ready for proposal" };
+      
     }
 
     const c = new Date(spCreatedAt);
@@ -246,7 +282,7 @@ function FeeSheetCard({ context }: { context: unknown }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-poll to tighten up “HubSpot noticing changes”
+  // Auto-poll
   useEffect(() => {
     if (!canOpen) return;
     if (isLoading) return;
@@ -274,10 +310,13 @@ function FeeSheetCard({ context }: { context: unknown }) {
         createdBy: createdByForRequest,
       });
 
-      setStatus(body?.message || "Created.");
+      alert("success", body?.message || "Fee sheet created.", "Created");
+      setStatus("");
       await loadFeeSheetMeta();
     } catch (e: unknown) {
-      setStatus(`Error: ${getErrorMessage(e)}`);
+      const msg = getErrorMessage(e);
+      alert("danger", msg, "Create failed");
+      setStatus(`Error: ${msg}`);
     } finally {
       setIsLoading(false);
     }
@@ -288,19 +327,23 @@ function FeeSheetCard({ context }: { context: unknown }) {
 
     try {
       setIsSyncingNow(true);
-      setStatus("Syncing now…");
+      setStatus("");
 
       const body = await callBackend({
         action: "refresh",
         objectId: String(objectId),
       });
 
-      if (body?.feeSheetLastSyncedAt) setLastSyncedAt(body.feeSheetLastSyncedAt);
+      if (body?.feeSheetLastSyncedAt)
+        setLastSyncedAt(body.feeSheetLastSyncedAt);
 
-      setStatus(body?.message || "Synced.");
+      alert("success", body?.message || "Synced successfully.", "Sync complete");
+      setStatus("");
       await loadFeeSheetMeta();
     } catch (e: unknown) {
-      setStatus(`Error: ${getErrorMessage(e)}`);
+      const msg = getErrorMessage(e);
+      alert("danger", msg, "Sync failed");
+      setStatus(`Error: ${msg}`);
     } finally {
       setIsSyncingNow(false);
     }
@@ -320,11 +363,13 @@ function FeeSheetCard({ context }: { context: unknown }) {
         updatedBy: createdByForRequest,
       });
 
-      setStatus(body?.message || "Ready set.");
+      alert("success", body?.message || "Marked ready for proposal.", "Updated");
       setProposalSentLocked(true);
       await loadFeeSheetMeta();
     } catch (e: unknown) {
-      setStatus(`Error: ${getErrorMessage(e)}`);
+      const msg = getErrorMessage(e);
+      alert("danger", msg, "Update failed");
+      setStatus(`Error: ${msg}`);
     } finally {
       setIsTogglingReady(false);
     }
@@ -344,129 +389,149 @@ function FeeSheetCard({ context }: { context: unknown }) {
         updatedBy: createdByForRequest,
       });
 
+      alert("success", "Reopened for edits.", "Updated");
       setProposalSentLocked(false);
       await loadFeeSheetMeta();
     } catch (e: unknown) {
-      setStatus(`Error: ${getErrorMessage(e)}`);
+      const msg = getErrorMessage(e);
+      alert("danger", msg, "Update failed");
+      setStatus(`Error: ${msg}`);
       setProposalSentLocked(true);
     } finally {
       setIsTogglingReady(false);
     }
   }
 
-  return (
-    <Flex direction="column" gap="sm">
-      {isLoading ? (
-        <Text variant="bodytext">Loading fee sheet…</Text>
-      ) : !canOpen ? (
-        <Button onClick={onCreate}>Create Fee Sheet</Button>
-      ) : (
-        <>
-          {statusDisplay && (
-            <StatusTag label={statusDisplay.label} tone={statusDisplay.tone} />
-          )}
+return (
+  <Flex direction="column" gap="flush">
+    {isLoading ? (
+      <Text variant="bodytext">Loading fee sheet…</Text>
+    ) : !canOpen ? (
+      <Button variant="primary" onClick={onCreate}>
+        Create Fee Sheet
+      </Button>
+    ) : (
+      <>
+        <Flex direction="column" gap="xs">
+          {/* Status + Approved (header block) */}
+          <Flex direction="column" gap="flush" justify="start">
+            <Flex direction="row" align="center" justify="start" gap="flush">
+              {statusDisplay && (
+                <StatusTag label={statusDisplay.label} tone={statusDisplay.tone} />
+              )}
 
-          {/* File tile */}
-          <Box flex="initial">
-            <Flex direction="row" align="baseline" gap="xs">
-              <Image src={EXCEL_ICON_URL} alt="Excel" width={32} />
+              {proposalSentLocked && (
+                
+                <Button
+                  variant="transparent"
+                  size="md"
+                  onClick={onGoBackToEditing}
+                  disabled={isTogglingReady || isSyncingNow}
+                  overlay={<Tooltip placement="top">Reopen for edits</Tooltip>}
+                >
+                  <Icon name="edit" />
+                </Button>
+
+                
+
+              )}
+            </Flex>
+
+            {proposalSentLocked ? (
+              <Text variant="microcopy">
+                Approved:{" "}
+                <Text inline variant="microcopy" format={{ italic: true }}>
+                  {relativeTime(readyAt || lastUpdatedAt)}
+                </Text>{" "}
+                by{" "}
+                <Text inline variant="microcopy" format={{ italic: true }}>
+                  {readyBy || "—"}
+                </Text>
+              </Text>
+            ) : (
+              <>
+             
+              </>
+            )}
+          </Flex>
+
+          {/* ✅ File tile (boxed) */}
+          <Tile compact={true}>
+            <Flex direction="row" align="baseline" gap="flush" justify="start">
+              <Image src={EXCEL_ICON_URL} alt="Excel" width={34} />
               <Link
+                variant="primary"
                 href={{ url: feeSheetUrl, external: true }}
                 onClick={openFeeSheet}
               >
                 {feeSheetFileName || "Fee Sheet"}
               </Link>
             </Flex>
-          </Box>
+          </Tile>
 
-          {/* Meta block */}
-          <Flex direction="column">
-            <Flex direction="row" gap="xs" align="baseline">
-              <Text variant="microcopy" format={{ fontWeight: "bold" }}>
-                {proposalSentLocked ? "Marked ready:" : "Last updated:"}
-              </Text>
-              <Text variant="microcopy">
-                {proposalSentLocked
-                  ? relativeTime(readyAt || lastUpdatedAt)
-                  : relativeTime(lastUpdatedAt || spLastModifiedAt)}
-              </Text>
-            </Flex>
-
-            <Flex direction="row" gap="xs" align="baseline">
-              <Text variant="microcopy" format={{ fontWeight: "bold" }}>
-                {proposalSentLocked ? "Completed by:" : "Created by:"}
-              </Text>
-              <Text variant="microcopy">
-                {proposalSentLocked ? readyBy || "—" : feeSheetCreatedBy || "—"}
-              </Text>
-            </Flex>
-          </Flex>
-
-          <Divider />
 
           {/* Actions */}
           <Flex direction="column" gap="xs">
+            <Flex direction="column" gap="xs"></Flex>
             <ButtonRow>
               {!proposalSentLocked ? (
                 <LoadingButton
                   variant="primary"
+                  size="md"
                   onClick={onSendProposal}
                   loading={isTogglingReady}
                   disabled={isLoading || proposalSentLocked || isSyncingNow}
                   resultIconName="success"
+                  
                 >
                   <Icon name="notification" />
-                  Ready for proposal
+                  Approve
                 </LoadingButton>
               ) : (
-                <>
-                  <Button variant="primary" disabled={true}>
-                    <Icon name="success" />
-                    Ready for proposal
-                  </Button>
-
-                  <LoadingButton
-                    variant="secondary"
-                    onClick={onSyncNow}
-                    loading={isSyncingNow}
-                    disabled={isTogglingReady || isLoading}
-                    resultIconName="success"
-                  >
-                    <Icon name="refresh" />
-                    Sync now
-                  </LoadingButton>
-
-                  {/* ✅ Icon-only "Reopen for edits" */}
-                  <Button
-                    variant="transparent"
-                    size="xs"
-                    onClick={onGoBackToEditing}
-                    disabled={isTogglingReady || isSyncingNow}
-                  >
-                    <Icon name="edit" />
-                  </Button>
-                </>
+                // ✅ Intentionally empty: once locked, the "Ready" button disappears
+                <></>
               )}
             </ButtonRow>
 
             {/* Helper line */}
+            
             {proposalSentLocked ? (
-              <Flex direction="row" align="baseline" gap="xs">
+              <Flex direction="column" gap="xs">
+                            <Flex direction="row" align="center" justify="start" gap="xs">
+
+                {/* Sync button */}
+                  <LoadingButton
+                    variant="secondary"
+                    size="xs"
+                    onClick={onSyncNow}
+                    loading={isSyncingNow}
+                    disabled={isTogglingReady || isLoading}
+                    resultIconName="success"
+                                      overlay={<Tooltip placement="top">Resync</Tooltip>}
+
+                  >
+                    <Icon name="refresh" />
+                    
+                  </LoadingButton>
+                {/* Last synced text below button */}
                 <Text variant="microcopy">
                   Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "—"}
                 </Text>
+                </Flex>
               </Flex>
             ) : (
-              <Flex direction="row" align="center" gap="xs">
+              <Flex direction="row" align="baseline" gap="xs">
                 <Text variant="microcopy">Posts to #proposals</Text>
               </Flex>
             )}
           </Flex>
-        </>
-      )}
+        </Flex>
+      </>
+    )}
 
-      {status && <Text variant="bodytext">{status}</Text>}
-    </Flex>
+    {/* Keep inline status only for errors */}
+    {status && <Text variant="bodytext">{status}</Text>}
+  </Flex>
   );
 }
 

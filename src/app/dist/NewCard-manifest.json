@@ -1,9 +1,9 @@
 {
-  "entry": "NewCard.tsx",
+  "entry": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/NewCard.tsx",
   "modules": {
     "internal": [
       {
-        "module": "NewCard.tsx",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/NewCard.tsx",
         "renderedExports": [
           "default"
         ]
@@ -11,13 +11,13 @@
     ],
     "external": [
       {
-        "module": "node_modules/@hubspot/ui-extensions/dist/internal/global-utils.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/@hubspot/ui-extensions/dist/internal/global-utils.js",
         "renderedExports": [
           "getWorkerGlobals"
         ]
       },
       {
-        "module": "node_modules/@hubspot/ui-extensions/dist/hubspot.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/@hubspot/ui-extensions/dist/hubspot.js",
         "renderedExports": [
           "serverless",
           "fetch",
@@ -25,58 +25,59 @@
         ]
       },
       {
-        "module": "node_modules/react/jsx-runtime.js?commonjs-module",
+        "module": "\u0000C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/react/jsx-runtime.js?commonjs-module",
         "renderedExports": [
           "__module"
         ]
       },
       {
-        "module": "node_modules/react/cjs/react-jsx-runtime.development.js?commonjs-exports",
+        "module": "\u0000C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/react/cjs/react-jsx-runtime.development.js?commonjs-exports",
         "renderedExports": [
           "__exports"
         ]
       },
       {
-        "module": "node_modules/react/cjs/react-jsx-runtime.development.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/react/cjs/react-jsx-runtime.development.js",
         "renderedExports": [
           "__require"
         ]
       },
       {
-        "module": "node_modules/react/jsx-runtime.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/react/jsx-runtime.js",
         "renderedExports": [
           "__require"
         ]
       },
       {
-        "module": "node_modules/react/jsx-runtime.js?commonjs-es-import",
+        "module": "\u0000C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/react/jsx-runtime.js?commonjs-es-import",
         "renderedExports": [
           "__moduleExports"
         ]
       },
       {
-        "module": "node_modules/@hubspot/ui-extensions/dist/shared/utils/remote-component-registry.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/@hubspot/ui-extensions/dist/shared/utils/remote-component-registry.js",
         "renderedExports": [
           "createRemoteComponentRegistry"
         ]
       },
       {
-        "module": "node_modules/@hubspot/ui-extensions/dist/shared/remoteComponents.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/@hubspot/ui-extensions/dist/shared/remoteComponents.js",
         "renderedExports": [
           "__hubSpotComponentRegistry",
           "Button",
           "ButtonRow",
-          "Divider",
           "Image",
           "Link",
           "Text",
-          "Box",
+          "Tile",
           "Flex",
-          "Icon"
+          "Icon",
+          "LoadingButton",
+          "Tooltip"
         ]
       },
       {
-        "module": "node_modules/@hubspot/ui-extensions/dist/internal/hook-utils.js",
+        "module": "C:/Users/adonahue/OneDrive - Designblendz LLC/Documents/GitHub/Fee-Sheet-Generator/src/app/cards/node_modules/@hubspot/ui-extensions/dist/internal/hook-utils.js",
         "renderedExports": []
       }
     ]

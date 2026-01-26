@@ -395,6 +395,7 @@ async function buildFlatCardMetaFast(dealId, hubspotToken) {
     };
   }
 
+
   const lastUpdatedAt = meta.feeSheetCreatedAt || meta.feeSheetLastSyncedAt || "";
 
   return {

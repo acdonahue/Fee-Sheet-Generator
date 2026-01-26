@@ -2,7 +2,7 @@
   "uid": "FeeSheetGenerator_app",
   "type": "app",
   "config": {
-    "name": "designblendz • Fee Sheet",
+    "name": "designblendz Fee Sheet App",
     "description": "An example to demonstrate how to build a static private app with developer projects.",
     "logo": "/app/app-logo.png",
     "distribution": "private",

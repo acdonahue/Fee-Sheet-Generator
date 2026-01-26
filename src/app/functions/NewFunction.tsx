@@ -35,12 +35,23 @@ function FeeSheetCard({ context }: { context: any }) {
     if (Number.isNaN(d.getTime())) return iso;
 
     const mins = Math.floor((Date.now() - d.getTime()) / 60000);
-    if (mins < 2) return "just now";
-    if (mins < 60) return `${mins} minutes ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours} hours ago`;
-    const days = Math.floor(hours / 24);
-    return days === 1 ? "yesterday" : `${days} days ago`;
+
+if (mins < 2) return "just now";
+
+if (mins < 60) {
+  return `${mins} minute${mins === 1 ? "" : "s"} ago `;
+}
+
+const hours = Math.floor(mins / 60);
+
+if (hours < 24) {
+  return `${hours} hour${hours === 1 ? "" : "s"} ago `;
+}
+
+const days = Math.floor(hours / 24);
+
+return `${days} day${days === 1 ? "" : "s"} ago `;
+
   };
 
   // Phase 1 status logic + override if readyForProposal
@@ -152,38 +163,38 @@ function FeeSheetCard({ context }: { context: any }) {
         <>
           {/* Status pill (left/top) */}
           {pill ? (
-            <Text size="sm" format={{ fontWeight: "bold" }}>
+            <Text variant="microcopy" format={{ fontWeight: "bold" }}>
               {pill.dot} {pill.label}
             </Text>
           ) : null}
 
           {/* Thumbnail preview (clickable) */}
-          <Link href={feeSheetUrl} openInNewTab>
+          <a href={feeSheetUrl} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block' }}>
             <Image
               src="https://50802810.fs1.hubspotusercontent-na1.net/hubfs/50802810/FSG%20thumb%203.png"
               alt="Fee Sheet preview"
               width={150}
             />
-          </Link>
+          </a>
 
           {/* File name (clickable) */}
-          <Link href={feeSheetUrl} openInNewTab>
+          <a href={feeSheetUrl} target="_blank" rel="noopener noreferrer">
             {feeSheetFileName || "Open Fee Sheet"}
-          </Link>
+          </a>
 
-          <Text size="sm">Created by: {feeSheetCreatedBy || "—"}</Text>
-          <Text size="sm">Last updated: {relativeTime(lastUpdatedAt)}</Text>
+          <Text variant="microcopy">Created by: {feeSheetCreatedBy || "—"}</Text>
+          <Text variant="microcopy">Last updated: {relativeTime(lastUpdatedAt)}</Text>
 
           {/* ✅ Checkbox / toggle ONLY after fee sheet exists */}
           <Flex direction="column" gap="xs">
             <Button onClick={toggleReady}>
               {readyForProposal ? "☑ ready for proposal" : "☐ ready for proposal"}
             </Button>
-            <Text size="sm">🔔 posts to Slack</Text>
+            <Text variant="microcopy">🔔 posts to Slack</Text>
 
             {/* Optional: show who/when it was marked ready */}
             {readyForProposal ? (
-              <Text size="sm">
+              <Text variant="microcopy">
                 Marked ready by: {readyBy || "—"} {readyAt ? `(${relativeTime(readyAt)})` : ""}
               </Text>
             ) : null}
@@ -191,7 +202,7 @@ function FeeSheetCard({ context }: { context: any }) {
         </>
       )}
 
-      {status ? <Text size="sm">{status}</Text> : null}
+      {status ? <Text variant="microcopy">{status}</Text> : null}
     </Flex>
   );
 }
