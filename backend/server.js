@@ -72,6 +72,25 @@ const HS_BASE = "https://api.hubapi.com";
 // ---------------------------
 // Small helpers
 // ---------------------------
+function sanitizeFileName(s) {
+  // SharePoint/OneDrive invalid characters: \ / : * ? " < > | and control chars
+  return String(s || "")
+    .replace(/[\\/:*?"<>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildNameFromTemplate(templateName, dealName) {
+  const safeDealName = sanitizeFileName(dealName) || "Untitled Deal";
+  const t = String(templateName || "").trim();
+
+  const dashIndex = t.indexOf("-");
+  const suffix = dashIndex === -1 ? "" : t.slice(dashIndex); // keeps the leading "-"
+  const base = `${safeDealName}${suffix || "-Fee Sheet"}`;
+
+  // Ensure .xlsx
+  return base.toLowerCase().endsWith(".xlsx") ? base : `${base}.xlsx`;
+}
 
 function toIsoNow() {
   return new Date().toISOString();
@@ -88,6 +107,15 @@ function toNumberOrZero(value) {
   const cleaned = String(value).replace(/[$,]/g, "").trim();
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
+}
+function formatUSD(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(n);
 }
 
 function sleep(ms) {
@@ -375,7 +403,9 @@ async function graphGetDriveItem(accessToken, driveId, itemId) {
 }
 
 // ---------------------------
-// FAST card meta (NO Graph calls)
+// ---------------------------
+// FAST card meta (mostly NO Graph calls)
+// Now: will do ONE Graph resolve only when URL exists AND ids are missing/mismatched
 // ---------------------------
 async function buildFlatCardMetaFast(dealId, hubspotToken) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
@@ -395,12 +425,60 @@ async function buildFlatCardMetaFast(dealId, hubspotToken) {
     };
   }
 
+  // Start with what's stored
+  let driveId = meta.feeSheetDriveId || "";
+  let itemId = meta.feeSheetItemId || "";
+  let feeSheetFileName = meta.feeSheetFileName || "";
+
+  // ✅ Self-heal: if URL changed (or ids missing), resolve and patch ids
+  try {
+    const accessToken = await getMsAccessToken();
+
+    // Always resolve if ids are missing, OR if the URL was manually changed and the ids are now stale
+    const resolved = await graphGetDriveItemFromShareLink(accessToken, meta.feeSheetUrl);
+
+    const resolvedDriveId = resolved?.driveId || "";
+    const resolvedItemId = resolved?.itemId || "";
+
+    const idsMissing = !driveId || !itemId;
+    const idsMismatch =
+      resolvedDriveId &&
+      resolvedItemId &&
+      (resolvedDriveId !== driveId || resolvedItemId !== itemId);
+
+    if (idsMissing || idsMismatch) {
+      driveId = resolvedDriveId;
+      itemId = resolvedItemId;
+
+      const patchProps = {
+        fee_sheet_drive_id: driveId,
+        fee_sheet_item_id: itemId,
+      };
+
+      // Optional: refresh filename so UI matches the new URL immediately
+      try {
+        const item = await graphGetDriveItem(accessToken, driveId, itemId);
+        const name = item?.name || "";
+        if (name && name !== feeSheetFileName) {
+          feeSheetFileName = name;
+          patchProps.fee_sheet_file_name = name;
+        }
+      } catch {
+        // ignore filename refresh failures
+      }
+
+      await hubspotPatchDeal(dealId, hubspotToken, patchProps);
+    }
+  } catch (e) {
+    // Don't fail the card load — just log and keep using stored values
+    console.log("[get] URL resolve/repair skipped:", e?.message || String(e));
+  }
 
   const lastUpdatedAt = meta.feeSheetCreatedAt || meta.feeSheetLastSyncedAt || "";
 
   return {
     feeSheetUrl: meta.feeSheetUrl,
-    feeSheetFileName: meta.feeSheetFileName || "",
+    feeSheetFileName: feeSheetFileName || "",
     feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
     lastUpdatedAt,
     spCreatedAt: "",
@@ -411,6 +489,7 @@ async function buildFlatCardMetaFast(dealId, hubspotToken) {
     fee_sheet_ready_by: meta.readyBy || "",
   };
 }
+
 
 async function buildFlatCardMeta(dealId, hubspotToken) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
@@ -507,9 +586,16 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
 // Create fee sheet (template copy) — OPTIONAL
 async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   const existing = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
-  if (existing?.feeSheetUrl) {
+
+  // IMPORTANT:
+  // Block duplicate creates even if fee_sheet_url is missing.
+  // Adjust these keys if your meta object uses different names.
+  if (existing?.fee_Sheet_Url || existing?.fee_Sheet_File_Name || existing?.fee_Sheet_Created_At) {
     const flat = await buildFlatCardMeta(dealId, hubspotToken);
-    return { message: "Fee sheet already exists for this deal.", ...flat };
+    return {
+      message: "Fee sheet already exists (or creation already started) for this deal.",
+      ...flat,
+    };
   }
 
   if (!FEE_SHEET_TEMPLATE_SHARE_URL || !FEE_SHEET_DEST_FOLDER_SHARE_URL) {
@@ -522,8 +608,14 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
 
   const accessToken = await getMsAccessToken();
 
-  const templateResolved = await graphGetDriveItemFromShareLink(accessToken, FEE_SHEET_TEMPLATE_SHARE_URL);
-  const destResolved = await graphGetDriveItemFromShareLink(accessToken, FEE_SHEET_DEST_FOLDER_SHARE_URL);
+  const templateResolved = await graphGetDriveItemFromShareLink(
+    accessToken,
+    FEE_SHEET_TEMPLATE_SHARE_URL
+  );
+  const destResolved = await graphGetDriveItemFromShareLink(
+    accessToken,
+    FEE_SHEET_DEST_FOLDER_SHARE_URL
+  );
 
   const templateDriveId = templateResolved.driveId;
   const templateItemId = templateResolved.itemId;
@@ -531,37 +623,109 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   const destDriveId = destResolved.driveId;
   const destFolderItemId = destResolved.itemId;
 
-  const fileName = `Fee Sheet - Deal ${dealId}.xlsx`;
+  // 1) Get deal name from HubSpot
+  const dealProps = await hubspotGetDealRaw(dealId, hubspotToken, ["dealname"]);
+  const dealName = dealProps?.dealname || `Deal ${dealId}`;
 
-  const copyRes = await fetch(
-    `https://graph.microsoft.com/v1.0/drives/${templateDriveId}/items/${templateItemId}/copy`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        parentReference: { driveId: destDriveId, id: destFolderItemId },
-        name: fileName,
-      }),
+  // 2) Get template item name from Graph
+  const templateItem = await graphGetDriveItem(accessToken, templateDriveId, templateItemId);
+  const templateName = templateItem?.name || "Project Name-Fee Sheet Template.xlsx";
+
+  // 3) Build final file name: "{Deal Name}{template suffix}"
+  const baseFileName = buildNameFromTemplate(templateName, dealName);
+
+  // Helpful logs (Render logs)
+  console.log("[FeeSheet] deal:", { dealId, dealName });
+  console.log("[FeeSheet] template:", { templateDriveId, templateItemId, templateName });
+  console.log("[FeeSheet] dest:", { destDriveId, destFolderItemId });
+  console.log("[FeeSheet] baseFileName:", baseFileName);
+
+  // Helper: add " (n)" before .xlsx
+  function withNumericSuffix(fileName, n) {
+    if (!n) return fileName;
+    return fileName.replace(/\.xlsx$/i, ` (${n}).xlsx`);
+  }
+
+  // Helper: check if a file with this name exists in the destination folder
+  async function graphChildNameExists(fileName) {
+    const escaped = String(fileName).replace(/'/g, "''"); // OData escape
+    const url =
+      `https://graph.microsoft.com/v1.0/drives/${destDriveId}/items/${destFolderItemId}` +
+      `/children?$filter=name eq '${escaped}'&$select=id,name,webUrl`;
+
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      console.log("[FeeSheet] exists-check failed:", res.status, txt);
+      return { exists: false, items: [] };
     }
+
+    const json = await res.json();
+    const items = Array.isArray(json?.value) ? json.value : [];
+    return { exists: items.length > 0, items };
+  }
+
+  // Prove whether Graph thinks it exists BEFORE copy
+  const existsCheck = await graphChildNameExists(baseFileName);
+  console.log(
+    "[FeeSheet] exists before copy?:",
+    existsCheck.exists,
+    existsCheck.items?.[0]?.webUrl || ""
   );
 
-  if (!copyRes.ok) {
+  // Try to copy. If nameAlreadyExists, retry with (1), (2), etc.
+  let finalFileName = baseFileName;
+
+  for (let i = 0; i < 15; i++) {
+    finalFileName = withNumericSuffix(baseFileName, i);
+
+    console.log(`[FeeSheet] copy attempt ${i + 1}/15:`, finalFileName);
+
+    const copyRes = await fetch(
+      `https://graph.microsoft.com/v1.0/drives/${templateDriveId}/items/${templateItemId}/copy`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          parentReference: { driveId: destDriveId, id: destFolderItemId },
+          name: finalFileName,
+        }),
+      }
+    );
+
+    if (copyRes.ok) {
+      console.log("[FeeSheet] copy accepted:", copyRes.status, finalFileName);
+      break;
+    }
+
     const txt = await copyRes.text();
+
+    // Only retry when the error is nameAlreadyExists
+    if (txt.includes('"code":"nameAlreadyExists"')) {
+      continue;
+    }
+
+    // Any other error should stop immediately
     throw new Error(`Template copy failed: ${txt}`);
   }
 
+  // Save deal metadata so we don't keep trying to recreate
   await hubspotPatchDeal(dealId, hubspotToken, {
-    fee_sheet_file_name: fileName,
+    fee_sheet_file_name: finalFileName,
     fee_sheet_created_by: createdBy || "Unknown user",
     fee_sheet_created_at: toIsoNow(),
   });
 
   const flat = await buildFlatCardMeta(dealId, hubspotToken);
-  return { message: "Fee sheet creation started ✅", ...flat };
+  return { message: `Fee sheet creation started ✅ (${finalFileName})`, ...flat };
 }
+
 
 // SYNC: authoritative line items from Input-DB
 const INPUT_DB_NAME_RANGE = "B15:B160";
@@ -810,7 +974,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       }
 
       return res.json({
-        message: `Synced ✅ (${amountNote} • Refresh to see line items.`,
+        message: `${amountNote}. Refresh to see line items.`,
         lineItemSummary: syncResult.summary,
         debugSample: syncResult.debugSample,
         createdKeysSample: syncResult.createdKeysSample,
