@@ -39,18 +39,18 @@ function FeeSheetCard({ context }: { context: any }) {
 if (mins < 2) return "just now";
 
 if (mins < 60) {
-  return `${mins} minute${mins === 1 ? "" : "s"} ago `;
+  return `${mins} minute${mins === 1 ? "" : "s"} ago`;
 }
 
 const hours = Math.floor(mins / 60);
 
 if (hours < 24) {
-  return `${hours} hour${hours === 1 ? "" : "s"} ago `;
+  return `${hours} hour${hours === 1 ? "" : "s"} ago`;
 }
 
 const days = Math.floor(hours / 24);
 
-return `${days} day${days === 1 ? "" : "s"} ago `;
+return `${days} day${days === 1 ? "" : "s"} ago`;
 
   };
 
