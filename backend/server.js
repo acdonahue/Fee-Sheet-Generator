@@ -1088,8 +1088,8 @@ app.all("/api/fee-sheet", async (req, res) => {
         fee_sheet_ready_at: toIsoNow(),
       };
 
-      const maybeLong = asLongStringOrNull(by);
-      if (maybeLong) patchProps.fee_sheet_ready_by = maybeLong;
+      patchProps.fee_sheet_ready_by = by;
+
 
       await hubspotPatchDealFast(dealId, HUBSPOT_TOKEN, patchProps);
 
