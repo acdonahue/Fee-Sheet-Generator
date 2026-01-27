@@ -1053,6 +1053,31 @@ app.all("/api/fee-sheet", async (req, res) => {
         dealAmountAfter: storedAmount,
       });
     }
+    if (action === "detach" || action === "detach-fee-sheet") {
+      await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, {
+        fee_sheet_url: "",
+        fee_sheet_drive_id: "",
+        fee_sheet_item_id: "",
+
+        // Optional (recommended): clear the rest so Create works cleanly
+        fee_sheet_file_name: "",
+        fee_sheet_created_by: "",
+        fee_sheet_created_at: "",
+        fee_sheet_last_synced_at: "",
+        fee_sheet_last_synced_by: "",
+        fee_sheet_ready_for_proposal: "false",
+        fee_sheet_ready_by: "",
+        fee_sheet_ready_at: "",
+      });
+
+      // Small stabilizer so UI reads the updated props immediately
+      await sleep(250);
+
+      return res.json({
+        message: "Fee sheet detached ✅",
+        ...(await buildFlatCardMetaFast(dealId, HUBSPOT_TOKEN)),
+      });
+    }
 
     if (action === "set-ready" || action === "setReady") {
       const next = String(ready).toLowerCase() === "true";
@@ -1086,6 +1111,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       path: err?.path || undefined,
     });
   }
+  
 });
 
 const PORT = Number(process.env.PORT || 3000);

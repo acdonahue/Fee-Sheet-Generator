@@ -8,10 +8,9 @@ import {
   Image,
   Icon,
   Link,
-  Divider,
-  ButtonRow,
   Tooltip,
   Tile,
+  ButtonRow,
 } from "@hubspot/ui-extensions";
 
 type HubSpotContext = {
@@ -128,7 +127,6 @@ function StatusTag({
   );
 }
 
-
 /* ---------- Card ---------- */
 
 function FeeSheetCard({
@@ -157,6 +155,7 @@ function FeeSheetCard({
 
   const [isTogglingReady, setIsTogglingReady] = useState(false);
   const [isSyncingNow, setIsSyncingNow] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const [proposalSentLocked, setProposalSentLocked] = useState(false);
 
@@ -219,7 +218,6 @@ function FeeSheetCard({
 
     if (proposalSentLocked) {
       return { tone: "success" as const, label: "Ready for proposal" };
-      
     }
 
     const c = new Date(spCreatedAt);
@@ -290,14 +288,14 @@ function FeeSheetCard({
     const POLL_MS = 20_000;
 
     const id = setInterval(() => {
-      if (isTogglingReady || isSyncingNow) return;
+      if (isTogglingReady || isSyncingNow || isDeleting) return;
       loadFeeSheetMeta().catch(() => {
         // silent
       });
     }, POLL_MS);
 
     return () => clearInterval(id);
-  }, [canOpen, isLoading, isTogglingReady, isSyncingNow, objectId]);
+  }, [canOpen, isLoading, isTogglingReady, isSyncingNow, isDeleting, objectId]);
 
   async function onCreate() {
     try {
@@ -323,7 +321,7 @@ function FeeSheetCard({
   }
 
   async function onSyncNow() {
-    if (isSyncingNow || isTogglingReady || isLoading) return;
+    if (isSyncingNow || isTogglingReady || isLoading || isDeleting) return;
 
     try {
       setIsSyncingNow(true);
@@ -334,8 +332,7 @@ function FeeSheetCard({
         objectId: String(objectId),
       });
 
-      if (body?.feeSheetLastSyncedAt)
-        setLastSyncedAt(body.feeSheetLastSyncedAt);
+      if (body?.feeSheetLastSyncedAt) setLastSyncedAt(body.feeSheetLastSyncedAt);
 
       alert("success", body?.message || "Synced successfully.", "Sync complete");
       setStatus("");
@@ -350,7 +347,7 @@ function FeeSheetCard({
   }
 
   async function onSendProposal() {
-    if (isTogglingReady || proposalSentLocked) return;
+    if (isTogglingReady || proposalSentLocked || isDeleting) return;
 
     try {
       setIsTogglingReady(true);
@@ -376,7 +373,7 @@ function FeeSheetCard({
   }
 
   async function onGoBackToEditing() {
-    if (isTogglingReady) return;
+    if (isTogglingReady || isDeleting) return;
 
     try {
       setIsTogglingReady(true);
@@ -402,136 +399,161 @@ function FeeSheetCard({
     }
   }
 
-return (
-  <Flex direction="column" gap="flush">
-    {isLoading ? (
-      <Text variant="bodytext">Loading fee sheet…</Text>
-    ) : !canOpen ? (
-      <Button variant="primary" onClick={onCreate}>
-        Create Fee Sheet
-      </Button>
-    ) : (
-      <>
-        <Flex direction="column" gap="xs">
-          {/* Status + Approved (header block) */}
-          <Flex direction="column" gap="flush" justify="start">
-            <Flex direction="row" align="center" justify="start" gap="flush">
-              {statusDisplay && (
-                <StatusTag label={statusDisplay.label} tone={statusDisplay.tone} />
-              )}
+  async function onDeleteFeeSheet() {
+    if (isDeleting || isLoading || isSyncingNow || isTogglingReady) return;
 
-              {proposalSentLocked && (
-                
-                <Button
+    try {
+      setIsDeleting(true);
+      setStatus("");
+
+      const body = await callBackend({
+        action: "detach", // backend must support this
+        objectId: String(objectId),
+        updatedBy: createdByForRequest,
+      });
+
+      alert("success", body?.message || "Fee sheet detached.", "Deleted");
+      setProposalSentLocked(false);
+      await loadFeeSheetMeta(); // flips UI to Create if url cleared
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e);
+      alert("danger", msg, "Delete failed");
+      setStatus(`Error: ${msg}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  return (
+    <Flex direction="column" gap="flush">
+      {isLoading ? (
+        <Text variant="bodytext">Loading fee sheet…</Text>
+      ) : !canOpen ? (
+        <Button variant="primary" onClick={onCreate}>
+          Create Fee Sheet
+        </Button>
+      ) : (
+        <>
+          <Flex direction="column" gap="xs">
+            {/* Status + header actions */}
+            <Flex direction="column" gap="flush" justify="start">
+              <Flex direction="row" align="center" justify="start" gap="flush">
+                {statusDisplay && (
+                  <StatusTag
+                    label={statusDisplay.label}
+                    tone={statusDisplay.tone}
+                  />
+                )}
+
+                {/* ✅ Always show Delete when a fee sheet exists */}
+                <LoadingButton
                   variant="transparent"
                   size="md"
-                  onClick={onGoBackToEditing}
-                  disabled={isTogglingReady || isSyncingNow}
-                  overlay={<Tooltip placement="top">Reopen for edits</Tooltip>}
+                  onClick={onDeleteFeeSheet}
+                  loading={isDeleting}
+                  disabled={isTogglingReady || isSyncingNow || isLoading}
+                  overlay={<Tooltip placement="top">Delete</Tooltip>}
                 >
-                  <Icon name="edit" />
-                </Button>
-
-                
-
-              )}
-            </Flex>
-
-            {proposalSentLocked ? (
-              <Text variant="microcopy">
-                Approved:{" "}
-                <Text inline variant="microcopy" format={{ italic: true }}>
-                  {relativeTime(readyAt || lastUpdatedAt)}
-                </Text>{" "}
-                by{" "}
-                <Text inline variant="microcopy" format={{ italic: true }}>
-                  {readyBy || "—"}
-                </Text>
-              </Text>
-            ) : (
-              <>
-             
-              </>
-            )}
-          </Flex>
-
-          {/* ✅ File tile (boxed) */}
-          <Tile compact={true}>
-            <Flex direction="row" align="baseline" gap="flush" justify="start">
-              <Image src={EXCEL_ICON_URL} alt="Excel" width={34} />
-              <Link
-                variant="primary"
-                href={{ url: feeSheetUrl, external: true }}
-                onClick={openFeeSheet}
-              >
-                {feeSheetFileName || "Fee Sheet"}
-              </Link>
-            </Flex>
-          </Tile>
-
-
-          {/* Actions */}
-          <Flex direction="column" gap="xs">
-            <Flex direction="column" gap="xs"></Flex>
-            <ButtonRow>
-              {!proposalSentLocked ? (
-                <LoadingButton
-                  variant="primary"
-                  size="md"
-                  onClick={onSendProposal}
-                  loading={isTogglingReady}
-                  disabled={isLoading || proposalSentLocked || isSyncingNow}
-                  resultIconName="success"
-                  
-                >
-                  <Icon name="notification" />
-                  Approve
+                  <Icon name="delete" />
                 </LoadingButton>
+
+                {/* ✅ Only show "Reopen" when locked */}
+                {proposalSentLocked && (
+                  <Button
+                    variant="transparent"
+                    size="md"
+                    onClick={onGoBackToEditing}
+                    disabled={isTogglingReady || isSyncingNow || isDeleting}
+                    overlay={<Tooltip placement="top">Reopen for edits</Tooltip>}
+                  >
+                    <Icon name="edit" />
+                  </Button>
+                )}
+              </Flex>
+
+              {proposalSentLocked ? (
+                <Text variant="microcopy">
+                  Approved:{" "}
+                  <Text inline variant="microcopy" format={{ italic: true }}>
+                    {relativeTime(readyAt || lastUpdatedAt)}
+                  </Text>{" "}
+                  by{" "}
+                  <Text inline variant="microcopy" format={{ italic: true }}>
+                    {readyBy || "—"}
+                  </Text>
+                </Text>
               ) : (
-                // ✅ Intentionally empty: once locked, the "Ready" button disappears
                 <></>
               )}
-            </ButtonRow>
+            </Flex>
 
-            {/* Helper line */}
-            
-            {proposalSentLocked ? (
-              <Flex direction="column" gap="xs">
-                            <Flex direction="row" align="center" justify="start" gap="xs">
+            {/* File tile */}
+            <Tile compact={true}>
+              <Flex direction="row" align="baseline" gap="sm" justify="start">
+                <Image src={EXCEL_ICON_URL} alt="Excel" width={34} />
+                <Link
+                  variant="primary"
+                  href={{ url: feeSheetUrl, external: true }}
+                  onClick={openFeeSheet}
+                >
+                  {feeSheetFileName || "Fee Sheet"}
+                </Link>
+              </Flex>
+            </Tile>
 
-                {/* Sync button */}
+            {/* Actions */}
+            <Flex direction="column" gap="flush">
+              <ButtonRow>
+                {!proposalSentLocked ? (
                   <LoadingButton
-                    variant="secondary"
-                    size="xs"
-                    onClick={onSyncNow}
-                    loading={isSyncingNow}
-                    disabled={isTogglingReady || isLoading}
+                    variant="primary"
+                    size="md"
+                    onClick={onSendProposal}
+                    loading={isTogglingReady}
+                    disabled={isLoading || proposalSentLocked || isSyncingNow || isDeleting}
                     resultIconName="success"
-                                      overlay={<Tooltip placement="top">Resync</Tooltip>}
-
                   >
-                    <Icon name="refresh" />
-                    
+                    <Icon name="notification" />
+                    Approve
                   </LoadingButton>
-                {/* Last synced text below button */}
-                <Text variant="microcopy">
-                  Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "—"}
-                </Text>
-                </Flex>
-              </Flex>
-            ) : (
-              <Flex direction="row" align="baseline" gap="xs">
-                <Text variant="microcopy">Posts to #proposals</Text>
-              </Flex>
-            )}
-          </Flex>
-        </Flex>
-      </>
-    )}
+                ) : (
+                  <></>
+                )}
+              </ButtonRow>
 
-    {/* Keep inline status only for errors */}
-    {status && <Text variant="bodytext">{status}</Text>}
-  </Flex>
+              {proposalSentLocked ? (
+                <Flex direction="column" gap="xs">
+                  <Flex direction="row" align="center" justify="start" gap="xs">
+                    <LoadingButton
+                      variant="secondary"
+                      size="xs"
+                      onClick={onSyncNow}
+                      loading={isSyncingNow}
+                      disabled={isTogglingReady || isLoading || isDeleting}
+                      resultIconName="success"
+                      overlay={<Tooltip placement="top">Resync</Tooltip>}
+                    >
+                      <Icon name="refresh" />
+                    </LoadingButton>
+
+                    <Text variant="microcopy">
+                      Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "—"}
+                    </Text>
+                  </Flex>
+                </Flex>
+              ) : (
+                <Flex direction="row" align="baseline" gap="xs">
+                  <Text variant="microcopy">Posts to #proposals</Text>
+                </Flex>
+              )}
+            </Flex>
+          </Flex>
+        </>
+      )}
+
+      {/* Keep inline status only for errors */}
+      {status && <Text variant="bodytext">{status}</Text>}
+    </Flex>
   );
 }
 
