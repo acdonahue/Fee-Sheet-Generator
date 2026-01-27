@@ -701,7 +701,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
     });
 
     return {
-      message: `Fee sheet already existed — linked it ✅ (${existingItem.name || baseFileName})`,
+      message: `Fee sheet already existed — linked it ✅,
       ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
     };
   }
@@ -777,7 +777,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   await sleep(300);
 
   return {
-    message: `Fee sheet created ✅ (${createdItem.name || finalFileName})`,
+    message: `Fee sheet created ✅,
     ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
   };
 }
