@@ -13,6 +13,7 @@
  *              waits for file to appear, creates share link, patches deal fee sheet meta
  * ✅ action=refresh (SYNC): authoritative sync from Excel
  * ✅ action=set-ready: FAST ONLY (toggles ready props). Does NOT sync line items or set amount.
+ * ✅ action=detach: clears fee sheet meta from the deal (files remain in SharePoint)
  *
  * Required Render env vars:
  * - HUBSPOT_PRIVATE_APP_TOKEN (preferred)  [or HUBSPOT_TOKEN]
@@ -117,15 +118,6 @@ function chunkArray(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
-}
-
-/**
- * Returns a numeric string if the input looks like an integer id, else null.
- * Use this to avoid writing names/emails into numeric HubSpot “user id” fields.
- */
-function asLongStringOrNull(value) {
-  const s = String(value ?? "").trim();
-  return /^\d+$/.test(s) ? s : null;
 }
 
 // ---------------------------
@@ -507,71 +499,9 @@ async function buildFlatCardMetaFast(dealId, hubspotToken) {
   };
 }
 
-async function buildFlatCardMeta(dealId, hubspotToken) {
-  const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
-
-  if (!meta.feeSheetUrl) {
-    return {
-      feeSheetUrl: "",
-      feeSheetFileName: "",
-      feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
-      lastUpdatedAt: "",
-      spCreatedAt: "",
-      spLastModifiedAt: "",
-      feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
-      readyForProposal: meta.readyForProposal || false,
-      fee_sheet_ready_at: meta.readyAt || "",
-      fee_sheet_ready_by: meta.readyBy || "",
-    };
-  }
-
-  const accessToken = await getMsAccessToken();
-
-  let driveId = meta.feeSheetDriveId || "";
-  let itemId = meta.feeSheetItemId || "";
-
-  if (!driveId || !itemId) {
-    const resolved = await graphGetDriveItemFromShareLink(
-      accessToken,
-      meta.feeSheetUrl
-    );
-    driveId = resolved.driveId;
-    itemId = resolved.itemId;
-
-    await hubspotPatchDeal(dealId, hubspotToken, {
-      fee_sheet_drive_id: driveId,
-      fee_sheet_item_id: itemId,
-    });
-  }
-
-  let spCreatedAt = "";
-  let spLastModifiedAt = "";
-  let feeSheetFileName = meta.feeSheetFileName || "";
-
-  try {
-    const item = await graphGetDriveItem(accessToken, driveId, itemId);
-    spCreatedAt = item?.createdDateTime || "";
-    spLastModifiedAt = item?.lastModifiedDateTime || "";
-    feeSheetFileName = feeSheetFileName || item?.name || "";
-  } catch {}
-
-  const lastUpdatedAt = spLastModifiedAt || meta.feeSheetCreatedAt || "";
-
-  return {
-    feeSheetUrl: meta.feeSheetUrl,
-    feeSheetFileName,
-    feeSheetCreatedBy: meta.feeSheetCreatedBy || "",
-    lastUpdatedAt,
-    spCreatedAt,
-    spLastModifiedAt,
-    feeSheetLastSyncedAt: meta.feeSheetLastSyncedAt || "",
-    readyForProposal: meta.readyForProposal || false,
-    fee_sheet_ready_at: meta.readyAt || "",
-    fee_sheet_ready_by: meta.readyBy || "",
-  };
-}
-
+// ---------------------------
 // Summary!J7 => Deal amount
+// ---------------------------
 async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   const meta = await hubspotGetDealFeeSheetMeta(dealId, hubspotToken);
   if (!meta?.feeSheetUrl) throw new Error("No fee sheet URL found on this deal.");
@@ -611,7 +541,9 @@ async function getSummaryJ7Amount({ dealId, hubspotToken }) {
   return { raw, amount: toNumberOrZero(raw) };
 }
 
+// ---------------------------
 // Create fee sheet (template copy)
+// ---------------------------
 async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   if (!FEE_SHEET_TEMPLATE_SHARE_URL || !FEE_SHEET_DEST_FOLDER_SHARE_URL) {
     const err = new Error(
@@ -648,13 +580,18 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
     templateDriveId,
     templateItemId
   );
-  const templateName = templateItem?.name || "Project Name-Fee Sheet Template.xlsx";
+  const templateName =
+    templateItem?.name || "Project Name-Fee Sheet Template.xlsx";
 
   // 3) Intended filename
   const baseFileName = buildNameFromTemplate(templateName, dealName);
 
   console.log("[FeeSheet] deal:", { dealId, dealName });
-  console.log("[FeeSheet] template:", { templateDriveId, templateItemId, templateName });
+  console.log("[FeeSheet] template:", {
+    templateDriveId,
+    templateItemId,
+    templateName,
+  });
   console.log("[FeeSheet] dest:", { destDriveId, destFolderItemId });
   console.log("[FeeSheet] intended name:", baseFileName);
 
@@ -689,7 +626,11 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   if (existingItem?.id) {
     console.log("[FeeSheet] found existing file, linking:", existingItem.name);
 
-    const shareUrl = await graphCreateViewLink(accessToken, destDriveId, existingItem.id);
+    const shareUrl = await graphCreateViewLink(
+      accessToken,
+      destDriveId,
+      existingItem.id
+    );
 
     await hubspotPatchDeal(dealId, hubspotToken, {
       fee_sheet_url: shareUrl,
@@ -701,7 +642,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
     });
 
     return {
-      message: `Fee sheet already existed — linked it ✅,
+      message: `Fee sheet already existed — linked it ✅ (${existingItem.name || baseFileName})`,
       ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
     };
   }
@@ -743,7 +684,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   }
 
   if (!copyAccepted) {
-    throw new Error(`Template copy failed after retries (names all existed?)`);
+    throw new Error("Template copy failed after retries (names all existed?)");
   }
 
   // Graph copy is async — poll until the file appears in the folder
@@ -755,6 +696,8 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   }
 
   if (!createdItem?.id) {
+    // We don't have an itemId yet, so we can't make a share link. Tell UI to wait.
+    // (User can click Create again later; STEP A will then link it.)
     return {
       message: `Fee sheet creation queued ✅ (${finalFileName}). Refresh this deal in ~30–60 seconds and click Create again if needed.`,
       ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
@@ -762,7 +705,11 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   }
 
   // Create org view link + write ALL deal properties
-  const shareUrl = await graphCreateViewLink(accessToken, destDriveId, createdItem.id);
+  const shareUrl = await graphCreateViewLink(
+    accessToken,
+    destDriveId,
+    createdItem.id
+  );
 
   await hubspotPatchDeal(dealId, hubspotToken, {
     fee_sheet_url: shareUrl,
@@ -777,7 +724,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   await sleep(300);
 
   return {
-    message: `Fee sheet created ✅,
+    message: `Fee sheet created ✅ (${createdItem.name || finalFileName})`,
     ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
   };
 }
@@ -999,8 +946,9 @@ app.all("/api/fee-sheet", async (req, res) => {
     const updatedBy = input.updatedBy;
     const createdBy = input.createdBy;
 
-    if (!dealId)
+    if (!dealId) {
       return res.status(400).json({ message: "Missing dealId/objectId." });
+    }
 
     if (action === "get") {
       const flat = await buildFlatCardMetaFast(dealId, HUBSPOT_TOKEN);
@@ -1053,13 +1001,14 @@ app.all("/api/fee-sheet", async (req, res) => {
         dealAmountAfter: storedAmount,
       });
     }
+
     if (action === "detach" || action === "detach-fee-sheet") {
       await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, {
         fee_sheet_url: "",
         fee_sheet_drive_id: "",
         fee_sheet_item_id: "",
 
-        // Optional (recommended): clear the rest so Create works cleanly
+        // Recommended: clear the rest so Create works cleanly
         fee_sheet_file_name: "",
         fee_sheet_created_by: "",
         fee_sheet_created_at: "",
@@ -1070,7 +1019,6 @@ app.all("/api/fee-sheet", async (req, res) => {
         fee_sheet_ready_at: "",
       });
 
-      // Small stabilizer so UI reads the updated props immediately
       await sleep(250);
 
       return res.json({
@@ -1086,10 +1034,10 @@ app.all("/api/fee-sheet", async (req, res) => {
       const patchProps = {
         fee_sheet_ready_for_proposal: next ? "true" : "false",
         fee_sheet_ready_at: toIsoNow(),
+
+        // This is what your UI reads for "Approved by"
+        fee_sheet_ready_by: by,
       };
-
-      patchProps.fee_sheet_ready_by = by;
-
 
       await hubspotPatchDealFast(dealId, HUBSPOT_TOKEN, patchProps);
 
@@ -1111,7 +1059,6 @@ app.all("/api/fee-sheet", async (req, res) => {
       path: err?.path || undefined,
     });
   }
-  
 });
 
 const PORT = Number(process.env.PORT || 3000);
