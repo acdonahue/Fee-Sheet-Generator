@@ -70,7 +70,7 @@ function FeeSheetCard({ context }: { context: FeeSheetContext }) {
 
     // If marked ready, override
     if (readyForProposal) {
-      return { dot: "🟢", label: "ready for proposal" };
+      return { dot: "🟢", label: "Ready for proposal" };
     }
 
     const c = new Date(spCreatedAt);
@@ -84,12 +84,12 @@ function FeeSheetCard({ context }: { context: FeeSheetContext }) {
     ) {
       const diffMs = Math.abs(m.getTime() - c.getTime());
       if (diffMs <= 60_000) {
-        return { dot: "🔴", label: "not started" };
+        return { dot: "🔴", label: "Not started" };
       }
-      return { dot: "🟡", label: "in progress" };
+      return { dot: "🟡", label: "In progress" };
     }
 
-    return { dot: "🟡", label: "in progress" };
+    return { dot: "🟡", label: "In progress" };
   };
 
   const pill = computeStatus();
@@ -199,12 +199,12 @@ function FeeSheetCard({ context }: { context: FeeSheetContext }) {
             <Button onClick={toggleReady}>
               {readyForProposal ? "☑ ready for proposal" : "☐ ready for proposal"}
             </Button>
-            <Text variant="microcopy">🔔 posts to Slack</Text>
+            <Text variant="microcopy">Sends a Slack notification</Text>
 
             {/* Optional: show who/when it was marked ready */}
             {readyForProposal ? (
               <Text variant="microcopy">
-                Marked ready by: {readyBy || "—"} {readyAt ? `(${relativeTime(readyAt)})` : ""}
+                Marked ready by {readyBy || "—"}{readyAt ? `, ${relativeTime(readyAt)}` : ""}
               </Text>
             ) : null}
           </Flex>

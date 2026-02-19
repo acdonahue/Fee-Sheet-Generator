@@ -629,7 +629,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
     });
 
     return {
-      message: "Fee sheet already existed, linked it ✅",
+      message: "Fee Sheet already exists — opening it now.",
       ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
     };
   }
@@ -687,7 +687,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
     // (User can click Create again later; STEP A will then link it.)
     return {
       message:
-        "Fee sheet creation queued ✅. Refresh this deal in ~30–60 seconds and click Create again if needed.",
+        "Your Fee Sheet is being prepared. Refresh the deal in about a minute to confirm it's ready.",
       ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
     };
   }
@@ -712,7 +712,7 @@ async function createFeeSheetFromTemplate({ dealId, hubspotToken, createdBy }) {
   await sleep(300);
 
   return {
-    message: "Fee sheet created ✅",
+    message: "Fee Sheet created.",
     ...(await buildFlatCardMetaFast(dealId, hubspotToken)),
   };
 }
@@ -741,7 +741,7 @@ app.all("/api/fee-sheet", async (req, res) => {
     const createdBy = input.createdBy;
 
     if (!dealId) {
-      return res.status(400).json({ message: "Missing dealId/objectId." });
+      return res.status(400).json({ message: "Missing deal ID." });
     }
 
     if (action === "get") {
@@ -768,7 +768,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       let attemptedAmount = null;
       let storedAmount = null;
-      let amountNote = "Deal amount not changed";
+      let amountNote = "Synced. Deal amount unchanged.";
 
       if (j7.amount !== null) {
         attemptedAmount = String(j7.amount);
@@ -782,11 +782,11 @@ app.all("/api/fee-sheet", async (req, res) => {
         storedAmount = await hubspotReadDealAmount(dealId, HUBSPOT_TOKEN);
 
         if (storedAmount === attemptedAmount) {
-          amountNote = `Deal amount set to ${attemptedAmount}.`;
+          amountNote = `Synced — deal amount updated to ${attemptedAmount}.`;
         } else {
-          amountNote = `Attempted to set deal amount to ${attemptedAmount}, but HubSpot shows ${
+          amountNote = `Synced, but the deal amount may not have updated. HubSpot shows ${
             storedAmount || "(blank)"
-          }.`;
+          } — check the deal and sync again if needed.`;
         }
       } else {
         await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, {
@@ -822,7 +822,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       await sleep(250);
 
       return res.json({
-        message: "Fee sheet detached ✅",
+        message: "Fee Sheet detached.",
         ...(await buildFlatCardMetaFast(dealId, HUBSPOT_TOKEN)),
       });
     }
@@ -843,8 +843,8 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       return res.json({
         message: next
-          ? "Fee Sheet is ready for proposal ✅"
-          : "Ready status updated ✅",
+          ? "Fee Sheet marked ready for proposal."
+          : "Fee Sheet reopened for editing.",
         readyForProposal: next,
       });
     }

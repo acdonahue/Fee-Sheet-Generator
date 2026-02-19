@@ -274,7 +274,7 @@ function FeeSheetCard({
         createdBy: currentUserName,
       });
 
-      alert("success", body?.message || "Fee sheet created.", "Created");
+      alert("success", body?.message || "Fee Sheet created.", "Created");
       setStatus("");
       await loadFeeSheetMeta();
     } catch (e: unknown) {
@@ -325,12 +325,12 @@ function FeeSheetCard({
         updatedBy: currentUserName,
       });
 
-      alert("success", body?.message || "Marked ready for proposal.", "Updated");
+      alert("success", body?.message || "Approved for proposal.", "Approved");
       setProposalSentLocked(true);
       await loadFeeSheetMeta();
     } catch (e: unknown) {
       const msg = getErrorMessage(e);
-      alert("danger", msg, "Update failed");
+      alert("danger", msg, "Approval failed");
       setStatus(`Error: ${msg}`);
     } finally {
       setIsTogglingReady(false);
@@ -351,12 +351,12 @@ function FeeSheetCard({
         updatedBy: currentUserName,
       });
 
-      alert("success", "Reopened for edits.", "Updated");
+      alert("success", "Fee Sheet reopened for editing.", "Unlocked");
       setProposalSentLocked(false);
       await loadFeeSheetMeta();
     } catch (e: unknown) {
       const msg = getErrorMessage(e);
-      alert("danger", msg, "Update failed");
+      alert("danger", msg, "Unlock failed");
       setStatus(`Error: ${msg}`);
       setProposalSentLocked(true);
     } finally {
@@ -377,7 +377,7 @@ function FeeSheetCard({
         updatedBy: currentUserName,
       });
 
-      alert("success", body?.message || "Fee sheet detached.", "Detached");
+      alert("success", body?.message || "Fee Sheet detached.", "Detached");
       setProposalSentLocked(false);
       await loadFeeSheetMeta(); // flips UI to Create if url cleared
     } catch (e: unknown) {
@@ -390,9 +390,9 @@ function FeeSheetCard({
   }
 
   return (
-    <Flex direction="column" gap="flush">
+    <Flex direction="column" gap="xs">
       {isLoading ? (
-        <Text variant="bodytext">Loading fee sheet…</Text>
+        <Text variant="bodytext">Loading…</Text>
       ) : !canOpen ? (
         <Button variant="primary" onClick={onCreate}>
           Create Fee Sheet
@@ -402,7 +402,7 @@ function FeeSheetCard({
           <Flex direction="column" gap="xs">
             {/* Status + header actions */}
             <Flex direction="column" gap="flush" justify="start">
-              <Flex direction="row" align="center" justify="start" gap="flush">
+              <Flex direction="row" align="center" justify="between">
                 {statusDisplay && (
                   <StatusTag
                     label={statusDisplay.label}
@@ -410,40 +410,42 @@ function FeeSheetCard({
                   />
                 )}
 
-                {/* ✅ Always show Detach when a fee sheet exists */}
-                <Button
-                  variant="transparent"
-                  size="md"
-                  onClick={onDeleteFeeSheet}
-                  disabled={isDeleting || isTogglingReady || isSyncingNow || isLoading}
-                  overlay={<Tooltip placement="top">Detach</Tooltip>}
-                >
-                  <Icon name="delete" />
-                </Button>
+                <Flex direction="row" align="center" gap="xs">
+                  {/* Only show "Unlock" when locked */}
+                  {proposalSentLocked && (
+                    <Button
+                      variant="transparent"
+                      size="md"
+                      onClick={onGoBackToEditing}
+                      disabled={isTogglingReady || isSyncingNow || isDeleting}
+                      overlay={<Tooltip placement="top">Unlock</Tooltip>}
+                    >
+                      <Icon name="edit" />
+                    </Button>
+                  )}
 
-                {/* ✅ Only show "Reopen" when locked */}
-                {proposalSentLocked && (
+                  {/* Always show Detach when a fee sheet exists */}
                   <Button
                     variant="transparent"
                     size="md"
-                    onClick={onGoBackToEditing}
-                    disabled={isTogglingReady || isSyncingNow || isDeleting}
-                    overlay={<Tooltip placement="top">Reopen for edits</Tooltip>}
+                    onClick={onDeleteFeeSheet}
+                    disabled={isDeleting || isTogglingReady || isSyncingNow || isLoading}
+                    overlay={<Tooltip placement="top">Detach</Tooltip>}
                   >
-                    <Icon name="edit" />
+                    <Icon name="delete" />
                   </Button>
-                )}
+                </Flex>
               </Flex>
 
               {proposalSentLocked && (
                 <Text variant="microcopy">
-                  Approved:{" "}
-                  <Text inline variant="microcopy" format={{ italic: true }}>
-                    {relativeTime(readyAt || lastUpdatedAt)}
-                  </Text>{" "}
-                  by{" "}
+                  Approved by{" "}
                   <Text inline variant="microcopy" format={{ italic: true }}>
                     {readyBy || "—"}
+                  </Text>
+                  ,{" "}
+                  <Text inline variant="microcopy" format={{ italic: true }}>
+                    {relativeTime(readyAt || lastUpdatedAt)}
                   </Text>
                 </Text>
               )}
@@ -497,13 +499,13 @@ function FeeSheetCard({
                     </LoadingButton>
 
                     <Text variant="microcopy">
-                      Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "—"}
+                      Last synced: {lastSyncedAt ? relativeTime(lastSyncedAt) : "never"}
                     </Text>
                   </Flex>
                 </Flex>
               ) : (
                 <Flex direction="row" align="baseline" gap="xs">
-                  <Text variant="microcopy">Posts to #proposals</Text>
+                  <Text variant="microcopy">Sends a Slack notification</Text>
                 </Flex>
               )}
             </Flex>
