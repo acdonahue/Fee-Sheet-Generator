@@ -977,7 +977,7 @@ app.all("/api/fee-sheet", async (req, res) => {
 
       let attemptedAmount = null;
       let storedAmount = null;
-      let amountNote = "Deal amount not changed.";
+      let amountNote = "Deal amount not changed";
 
       if (j7.amount !== null) {
         attemptedAmount = String(j7.amount);
