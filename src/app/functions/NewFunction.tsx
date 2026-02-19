@@ -1,9 +1,28 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { hubspot, Button, Text, Flex, Link, Image } from "@hubspot/ui-extensions";
+import { hubspot, Button, Text, Flex, Image } from "@hubspot/ui-extensions";
 
-hubspot.extend(({ context }) => <FeeSheetCard context={context} />);
+type FeeSheetContext = {
+  crm?: { objectId?: string; recordId?: string };
+  objectId?: string;
+  user?: { firstName?: string; lastName?: string; email?: string };
+};
 
-function FeeSheetCard({ context }: { context: any }) {
+type ServerlessBody = {
+  feeSheetUrl?: string;
+  feeSheetCreatedBy?: string;
+  feeSheetFileName?: string;
+  lastUpdatedAt?: string;
+  spCreatedAt?: string;
+  spLastModifiedAt?: string;
+  feeSheetReadyForProposal?: boolean;
+  feeSheetReadyBy?: string;
+  feeSheetReadyAt?: string;
+  message?: string;
+};
+
+hubspot.extend(({ context }) => <FeeSheetCard context={context as FeeSheetContext} />);
+
+function FeeSheetCard({ context }: { context: FeeSheetContext }) {
   const [status, setStatus] = useState("");
 
   const [feeSheetUrl, setFeeSheetUrl] = useState("");
@@ -26,8 +45,10 @@ function FeeSheetCard({ context }: { context: any }) {
     return full || context?.user?.email || "Unknown user";
   }, [context]);
 
-  const getBody = (result: any) =>
-    result?.response?.body || result?.body || result || {};
+  const getBody = (result: unknown): ServerlessBody => {
+    const r = result as { response?: { body?: ServerlessBody }; body?: ServerlessBody } | null;
+    return r?.response?.body ?? r?.body ?? {};
+  };
 
   const relativeTime = (iso: string) => {
     if (!iso) return "—";
@@ -35,23 +56,12 @@ function FeeSheetCard({ context }: { context: any }) {
     if (Number.isNaN(d.getTime())) return iso;
 
     const mins = Math.floor((Date.now() - d.getTime()) / 60000);
-
-if (mins < 2) return "just now";
-
-if (mins < 60) {
-  return `${mins} minute${mins === 1 ? "" : "s"} ago`;
-}
-
-const hours = Math.floor(mins / 60);
-
-if (hours < 24) {
-  return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-}
-
-const days = Math.floor(hours / 24);
-
-return `${days} day${days === 1 ? "" : "s"} ago`;
-
+    if (mins < 2) return "just now";
+    if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? "" : "s"} ago`;
   };
 
   // Phase 1 status logic + override if readyForProposal
@@ -106,10 +116,9 @@ return `${days} day${days === 1 ? "" : "s"} ago`;
   }
 
   useEffect(() => {
-    loadFeeSheetMeta().catch((e: any) => {
-      setStatus(`Load error: ${e?.message || String(e)}`);
+    loadFeeSheetMeta().catch((e: unknown) => {
+      setStatus(`Load error: ${e instanceof Error ? e.message : String(e)}`);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function onCreate() {
@@ -125,8 +134,8 @@ return `${days} day${days === 1 ? "" : "s"} ago`;
       setStatus(body?.message || "Created.");
 
       await loadFeeSheetMeta();
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -150,8 +159,8 @@ return `${days} day${days === 1 ? "" : "s"} ago`;
 
       // Refresh all fields
       await loadFeeSheetMeta();
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message || String(e)}`);
+    } catch (e: unknown) {
+      setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

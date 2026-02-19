@@ -1,5 +1,4 @@
-```js
-/* eslint-env node */
+/* global require, process, Buffer */
 /* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * backend/server.js (FULL FILE REPLACEMENT, CommonJS for Render)
@@ -325,7 +324,7 @@ async function graphFetch(accessToken, path, { method = "GET", body } = {}) {
 
   try {
     json = text ? JSON.parse(text) : null;
-  } catch {}
+  } catch { /* ignore JSON parse errors; json stays null */ }
 
   if (!res.ok) {
     const msg = json?.error?.message || text || `Graph error ${res.status}`;
@@ -471,7 +470,7 @@ async function buildFlatCardMetaFast(dealId, hubspotToken) {
     console.log("[get] URL resolve/repair skipped:", e?.message || String(e));
   }
 
-  const lastUpdatedAt = meta.feeSheetCreatedAt || meta.feeSheetLastSyncedAt || "";
+  const lastUpdatedAt = meta.feeSheetLastSyncedAt || meta.feeSheetCreatedAt || "";
 
   return {
     feeSheetUrl: meta.feeSheetUrl,
@@ -803,7 +802,7 @@ app.all("/api/fee-sheet", async (req, res) => {
       });
     }
 
-    if (action === "detach" || action === "detach-fee-sheet") {
+    if (action === "detach") {
       await hubspotPatchDeal(dealId, HUBSPOT_TOKEN, {
         fee_sheet_url: "",
         fee_sheet_drive_id: "",
@@ -864,4 +863,3 @@ app.all("/api/fee-sheet", async (req, res) => {
 
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
-```

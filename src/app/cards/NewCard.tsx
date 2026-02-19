@@ -143,10 +143,7 @@ function FeeSheetCard({
 
   const [feeSheetUrl, setFeeSheetUrl] = useState("");
   const [feeSheetFileName, setFeeSheetFileName] = useState("");
-  const [feeSheetCreatedBy, setFeeSheetCreatedBy] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState("");
-  const [spCreatedAt, setSpCreatedAt] = useState("");
-  const [spLastModifiedAt, setSpLastModifiedAt] = useState("");
   const [lastSyncedAt, setLastSyncedAt] = useState("");
 
   // proposal metadata
@@ -161,7 +158,7 @@ function FeeSheetCard({
 
   const objectId = ctx.crm?.objectId || ctx.crm?.recordId || ctx.objectId || "";
 
-  const createdByForRequest = useMemo(() => {
+  const currentUserName = useMemo(() => {
     const first = ctx.user?.firstName || "";
     const last = ctx.user?.lastName || "";
     return `${first} ${last}`.trim() || ctx.user?.email || "Unknown user";
@@ -171,23 +168,13 @@ function FeeSheetCard({
 
   const openFeeSheet = async () => {
     if (!canOpen) return;
-
     try {
       const hs = hubspot as unknown as HubspotWithActions;
       if (hs.actions?.openUrl) {
         await hs.actions.openUrl({ url: feeSheetUrl });
-        return;
       }
     } catch {
-      // ignore and fall back
-    }
-
-    try {
-      if (typeof window !== "undefined" && window?.open) {
-        window.open(feeSheetUrl, "_blank", "noopener,noreferrer");
-      }
-    } catch {
-      setStatus("Could not open file from this card environment.");
+      // openUrl not available in this card context
     }
   };
 
@@ -206,35 +193,18 @@ function FeeSheetCard({
 
     const mins = Math.floor((Date.now() - d.getTime()) / 60000);
     if (mins < 2) return "just now";
-    if (mins < 60) return `${mins} minutes ago`;
+    if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
     const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours} hours ago`;
+    if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
     const days = Math.floor(hours / 24);
     return days === 1 ? "yesterday" : `${days} days ago`;
   };
 
   const computeStatus = () => {
     if (!feeSheetUrl) return null;
-
     if (proposalSentLocked) {
       return { tone: "success" as const, label: "Ready for proposal" };
     }
-
-    const c = new Date(spCreatedAt);
-    const m = new Date(spLastModifiedAt);
-
-    if (
-      spCreatedAt &&
-      spLastModifiedAt &&
-      !Number.isNaN(c.getTime()) &&
-      !Number.isNaN(m.getTime())
-    ) {
-      const diff = Math.abs(m.getTime() - c.getTime());
-      return diff <= 60_000
-        ? { tone: "error" as const, label: "Not started" }
-        : { tone: "warning" as const, label: "In progress" };
-    }
-
     return { tone: "warning" as const, label: "In progress" };
   };
 
@@ -248,10 +218,7 @@ function FeeSheetCard({
 
     setFeeSheetUrl(body?.feeSheetUrl || "");
     setFeeSheetFileName(body?.feeSheetFileName || "");
-    setFeeSheetCreatedBy(body?.feeSheetCreatedBy || "");
     setLastUpdatedAt(body?.lastUpdatedAt || "");
-    setSpCreatedAt(body?.spCreatedAt || "");
-    setSpLastModifiedAt(body?.spLastModifiedAt || "");
     setLastSyncedAt(body?.feeSheetLastSyncedAt || "");
 
     const serverReadyAt =
@@ -277,7 +244,6 @@ function FeeSheetCard({
         setIsLoading(false);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto-poll
@@ -305,7 +271,7 @@ function FeeSheetCard({
       const body = await callBackend({
         action: "create",
         objectId: String(objectId),
-        createdBy: createdByForRequest,
+        createdBy: currentUserName,
       });
 
       alert("success", body?.message || "Fee sheet created.", "Created");
@@ -330,9 +296,8 @@ function FeeSheetCard({
       const body = await callBackend({
         action: "refresh",
         objectId: String(objectId),
+        updatedBy: currentUserName,
       });
-
-      if (body?.feeSheetLastSyncedAt) setLastSyncedAt(body.feeSheetLastSyncedAt);
 
       alert("success", body?.message || "Synced successfully.", "Sync complete");
       setStatus("");
@@ -357,7 +322,7 @@ function FeeSheetCard({
         action: "set-ready",
         objectId: String(objectId),
         ready: "true",
-        updatedBy: createdByForRequest,
+        updatedBy: currentUserName,
       });
 
       alert("success", body?.message || "Marked ready for proposal.", "Updated");
@@ -383,7 +348,7 @@ function FeeSheetCard({
         action: "set-ready",
         objectId: String(objectId),
         ready: "false",
-        updatedBy: createdByForRequest,
+        updatedBy: currentUserName,
       });
 
       alert("success", "Reopened for edits.", "Updated");
@@ -409,15 +374,15 @@ function FeeSheetCard({
       const body = await callBackend({
         action: "detach", // backend must support this
         objectId: String(objectId),
-        updatedBy: createdByForRequest,
+        updatedBy: currentUserName,
       });
 
-      alert("success", body?.message || "Fee sheet detached.", "Deleted");
+      alert("success", body?.message || "Fee sheet detached.", "Detached");
       setProposalSentLocked(false);
       await loadFeeSheetMeta(); // flips UI to Create if url cleared
     } catch (e: unknown) {
       const msg = getErrorMessage(e);
-      alert("danger", msg, "Delete failed");
+      alert("danger", msg, "Detach failed");
       setStatus(`Error: ${msg}`);
     } finally {
       setIsDeleting(false);
@@ -445,17 +410,16 @@ function FeeSheetCard({
                   />
                 )}
 
-                {/* ✅ Always show Delete when a fee sheet exists */}
-                <LoadingButton
+                {/* ✅ Always show Detach when a fee sheet exists */}
+                <Button
                   variant="transparent"
                   size="md"
                   onClick={onDeleteFeeSheet}
-                  loading={isDeleting}
-                  disabled={isTogglingReady || isSyncingNow || isLoading}
-                  overlay={<Tooltip placement="top">Delete</Tooltip>}
+                  disabled={isDeleting || isTogglingReady || isSyncingNow || isLoading}
+                  overlay={<Tooltip placement="top">Detach</Tooltip>}
                 >
                   <Icon name="delete" />
-                </LoadingButton>
+                </Button>
 
                 {/* ✅ Only show "Reopen" when locked */}
                 {proposalSentLocked && (
@@ -471,7 +435,7 @@ function FeeSheetCard({
                 )}
               </Flex>
 
-              {proposalSentLocked ? (
+              {proposalSentLocked && (
                 <Text variant="microcopy">
                   Approved:{" "}
                   <Text inline variant="microcopy" format={{ italic: true }}>
@@ -482,8 +446,6 @@ function FeeSheetCard({
                     {readyBy || "—"}
                   </Text>
                 </Text>
-              ) : (
-                <></>
               )}
             </Flex>
 
@@ -502,9 +464,9 @@ function FeeSheetCard({
             </Tile>
 
             {/* Actions */}
-            <Flex direction="column" gap="flush">
+            <Flex direction="column" gap="xs">
               <ButtonRow>
-                {!proposalSentLocked ? (
+                {!proposalSentLocked && (
                   <LoadingButton
                     variant="primary"
                     size="md"
@@ -516,8 +478,6 @@ function FeeSheetCard({
                     <Icon name="notification" />
                     Approve
                   </LoadingButton>
-                ) : (
-                  <></>
                 )}
               </ButtonRow>
 
